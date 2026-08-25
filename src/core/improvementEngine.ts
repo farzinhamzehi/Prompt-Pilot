@@ -177,3 +177,48 @@ The improved prompt must be ready to paste directly into an AI agent.`;
 export function buildUserMessage(draft: string, preset: PresetId): string {
   return `${PRESETS[preset].instruction}\n\nDraft prompt:\n"""\n${draft}\n"""`;
 }
+
+export interface ValidationResult {
+  valid: boolean;
+  error?: string;
+}
+
+export function validatePrompt(draft: string): ValidationResult {
+  const trimmed = draft.trim();
+
+  if (!trimmed) {
+    return { valid: false, error: "Prompt cannot be empty. Please enter a prompt to improve." };
+  }
+
+  if (trimmed.length < 3) {
+    return { valid: false, error: "Prompt is too short. Please describe what you want to achieve." };
+  }
+
+  // Detect single-character repetition (e.g. "aaaaaaa", "zzzzzzzz")
+  if (/^(.)\1+$/i.test(trimmed)) {
+    return { valid: false, error: "Input contains invalid repeated characters. Please enter a meaningful prompt." };
+  }
+
+  // Detect gibberish / keyboard mash in Latin text (e.g. "djfhsjhgfjshgjuw")
+  const latinLetters = trimmed.replace(/[^a-zA-Z]/g, "");
+  if (latinLetters.length >= 6) {
+    const vowels = latinLetters.match(/[aeiouy]/gi);
+    const vowelCount = vowels ? vowels.length : 0;
+    const vowelRatio = vowelCount / latinLetters.length;
+
+    // Gibberish strings typically have less than 10% vowels
+    if (vowelRatio < 0.10) {
+      return {
+        valid: false,
+        error: "Input appears to be random characters. Please enter a meaningful prompt (e.g. 'Create a login form').",
+      };
+    }
+
+    // Detect repeated short pattern loops (e.g. "asdfasdfasdf", "abcabcabc")
+    if (/^(.{2,4})\1{2,}$/i.test(latinLetters)) {
+      return { valid: false, error: "Input contains repetitive patterns. Please enter a meaningful prompt." };
+    }
+  }
+
+  return { valid: true };
+}

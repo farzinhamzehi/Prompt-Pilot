@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.1.6] - 2026-08-22
+
+### Fixed
+- **Quota Reset on Reinstall Bug**: Fixed an issue where daily remaining prompt quota reset to 30 when uninstalling and reinstalling the extension. Added persistent `X-Machine-ID` header rate-limiting on the proxy server and automatic startup quota synchronization for the webview.
+
+---
+
+## [0.1.5] - 2026-08-22
+
+### Added
+- **Remaining Prompts Badge**: Displays daily remaining prompt count (e.g., `⚡ 29 free prompts remaining today`).
+- **Nonsensical Input Validation**: Added strict validation against empty, repeated characters, or keyboard-mash gibberish (e.g. `djfhsjhgfjshgjuw`).
+
+---
+
+## [0.1.4] - 2026-08-22
+
+### Fixed
+- Fixed activity bar hover tooltip text from "Prompt Improver" to **"PromptPilot"**.
+- Fixed activity bar gray square icon issue by converting to a theme-adaptive vector SVG (`sidebar.svg`).
+
+---
+
 ## [0.1.3] - 2026-08-21
 
 ### Added

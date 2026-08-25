@@ -1,7 +1,7 @@
 import * as vscode from "vscode";
 import { sendToChat } from "./chatHandoff";
 import { LlmService } from "./llm/LlmService";
-import { PresetId, PRESETS } from "./core/improvementEngine";
+import { PresetId, PRESETS, validatePrompt } from "./core/improvementEngine";
 
 interface ImproveOptions {
   implementationPlan: boolean;
@@ -59,13 +59,33 @@ export class PromptPanelProvider implements vscode.WebviewViewProvider {
     view.webview.options = { enableScripts: true };
     view.webview.html = this.html(view.webview);
 
+    // Fetch current remaining quota for this machine ID asynchronously and sync UI
+    void this.llm.getQuota().then((remaining) => {
+      if (typeof remaining === "number") {
+        void view.webview.postMessage({ type: "quota", remaining });
+      }
+    });
+
     view.webview.onDidReceiveMessage(async (msg: WebviewMsg) => {
       switch (msg.type) {
         case "improve": {
+          const validation = validatePrompt(msg.prompt);
+          if (!validation.valid) {
+            view.webview.postMessage({
+              type: "error",
+              message: validation.error,
+            });
+            break;
+          }
+
           try {
-            const raw = await this.llm.improve(msg.prompt, msg.preset);
-            const improved = applyOptions(raw, msg.options);
-            view.webview.postMessage({ type: "result", improved });
+            const result = await this.llm.improve(msg.prompt, msg.preset);
+            const improved = applyOptions(result.improved, msg.options);
+            view.webview.postMessage({
+              type: "result",
+              improved,
+              remaining: result.remaining,
+            });
           } catch (err) {
             view.webview.postMessage({
               type: "error",
@@ -223,8 +243,18 @@ export class PromptPanelProvider implements vscode.WebviewViewProvider {
   }
   button.secondary:hover { opacity: .85; }
 
-  /* Status + error */
+  /* Status + error + quota */
   #status { font-size: 11px; opacity: .65; min-height: 14px; margin-top: 4px; }
+  #quota {
+    display: block;
+    margin-top: 6px;
+    padding: 5px 8px;
+    border-radius: 4px;
+    font-size: 11px;
+    background: var(--vscode-badge-background, rgba(255,255,255,.07));
+    color: var(--vscode-badge-foreground, inherit);
+    opacity: .9;
+  }
   #error {
     display: none;
     margin-top: 6px;
@@ -304,6 +334,7 @@ export class PromptPanelProvider implements vscode.WebviewViewProvider {
   </div>
 
   <div id="status"></div>
+  <div id="quota">⚡ 30/30 remaining prompts</div>
   <div id="error"></div>
 
 <script nonce="${nonce}">
@@ -321,6 +352,7 @@ export class PromptPanelProvider implements vscode.WebviewViewProvider {
     $("opt-commit").checked = !!prev.optCommit;
     $("opt-push").checked   = !!prev.optPush;
     if (prev.optCommit) $("push-row").classList.remove("hidden");
+    if (prev.quotaText) $("quota").textContent = prev.quotaText;
   }
 
   const save = () => vscode.setState({
@@ -330,6 +362,7 @@ export class PromptPanelProvider implements vscode.WebviewViewProvider {
     optPlan:   $("opt-plan").checked,
     optCommit: $("opt-commit").checked,
     optPush:   $("opt-push").checked,
+    quotaText: $("quota").textContent,
   });
 
   $("input").addEventListener("input",  save);
@@ -404,8 +437,16 @@ export class PromptPanelProvider implements vscode.WebviewViewProvider {
   // ── Messages from host ─────────────────────────────────────────────────────
   window.addEventListener("message", e => {
     const msg = e.data;
-    if (msg.type === "result") {
+    if (msg.type === "quota") {
+      if (typeof msg.remaining === "number") {
+        $("quota").textContent = "⚡ " + msg.remaining + "/30 remaining prompts";
+        save();
+      }
+    } else if (msg.type === "result") {
       $("output").value = msg.improved;
+      if (typeof msg.remaining === "number") {
+        $("quota").textContent = "⚡ " + msg.remaining + "/30 remaining prompts";
+      }
       setLoading(false);
       save();
     } else if (msg.type === "error") {

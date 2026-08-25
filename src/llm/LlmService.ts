@@ -22,6 +22,11 @@ interface AnthropicResponse {
 // LlmService
 // ---------------------------------------------------------------------------
 
+export interface ImproveResult {
+  improved: string;
+  remaining?: number;
+}
+
 export class LlmService {
   constructor(private readonly context: vscode.ExtensionContext) {}
 
@@ -31,13 +36,13 @@ export class LlmService {
    *  2. User's own API key (OpenAI / Anthropic / Groq / custom)
    *  3. Hosted proxy (Cloudflare Worker → Groq)
    */
-  async improve(draft: string, preset: PresetId): Promise<string> {
+  async improve(draft: string, preset: PresetId): Promise<ImproveResult> {
     const userMsg = buildUserMessage(draft, preset);
 
     // ── Tier 1: vscode.lm ──────────────────────────────────────────────────
     try {
       const result = await this.tryVscodeLm(userMsg);
-      if (result) return result;
+      if (result) return { improved: result };
     } catch {
       // Not available — fall through
     }
@@ -47,7 +52,7 @@ export class LlmService {
     if (apiKey) {
       try {
         const result = await this.tryUserKey(apiKey, userMsg);
-        if (result) return result;
+        if (result) return { improved: result };
       } catch (err) {
         // Key may be wrong; show a helpful error and fall through to proxy
         void vscode.window.showWarningMessage(
@@ -171,9 +176,34 @@ export class LlmService {
     return block.text.trim();
   }
 
+  /**
+   * Fetches remaining daily quota from the proxy server without consuming a prompt count.
+   */
+  async getQuota(): Promise<number | null> {
+    const cfg = vscode.workspace.getConfiguration("promptImprover");
+    const proxyUrl =
+      cfg.get<string>("proxyUrl") ||
+      "https://promptpilot-proxy.5farzinhamzei.workers.dev/improve";
+
+    try {
+      const res = await fetch(proxyUrl, {
+        method: "GET",
+        headers: {
+          "X-Machine-ID": vscode.env.machineId,
+        },
+      });
+
+      if (!res.ok) return null;
+      const data = (await res.json()) as { remaining?: number };
+      return typeof data.remaining === "number" ? data.remaining : null;
+    } catch {
+      return null;
+    }
+  }
+
   // ── Tier 3 ────────────────────────────────────────────────────────────────
 
-  private async tryProxy(userMsg: string): Promise<string> {
+  private async tryProxy(userMsg: string): Promise<ImproveResult> {
     const cfg = vscode.workspace.getConfiguration("promptImprover");
     const proxyUrl =
       cfg.get<string>("proxyUrl") ||
@@ -183,7 +213,10 @@ export class LlmService {
     try {
       res = await fetch(proxyUrl, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: {
+          "Content-Type": "application/json",
+          "X-Machine-ID": vscode.env.machineId,
+        },
         body: JSON.stringify({ systemPrompt: SYSTEM_PROMPT, userMessage: userMsg }),
       });
     } catch {
@@ -202,7 +235,7 @@ export class LlmService {
     }
 
     const data = (await res.json()) as { improved: string; remaining: number };
-    return data.improved;
+    return { improved: data.improved, remaining: data.remaining };
   }
 
   // ── Helpers ───────────────────────────────────────────────────────────────

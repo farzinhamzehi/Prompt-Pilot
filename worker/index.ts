@@ -8,8 +8,8 @@ const CF_MODEL = "@cf/meta/llama-3.2-3b-instruct";
 
 const CORS_HEADERS = {
   "Access-Control-Allow-Origin": "*",
-  "Access-Control-Allow-Methods": "POST, OPTIONS",
-  "Access-Control-Allow-Headers": "Content-Type",
+  "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+  "Access-Control-Allow-Headers": "Content-Type, X-Machine-ID",
 };
 
 function json(data: unknown, status = 200): Response {
@@ -19,13 +19,39 @@ function json(data: unknown, status = 200): Response {
   });
 }
 
+function getIdentifier(request: Request): string {
+  const machineId = request.headers.get("X-Machine-ID");
+  if (machineId && machineId.trim().length > 0) {
+    return machineId.trim();
+  }
+
+  return (
+    request.headers.get("CF-Connecting-IP") ||
+    request.headers.get("X-Forwarded-For") ||
+    "unknown"
+  );
+}
+
+async function getRemainingQuota(
+  kv: KVNamespace,
+  identifier: string,
+  dailyLimit: number
+): Promise<number> {
+  const today = new Date().toISOString().slice(0, 10);
+  const key = `rl:${identifier}:${today}`;
+
+  const raw = await kv.get(key);
+  const count = raw ? parseInt(raw, 10) : 0;
+  return Math.max(0, dailyLimit - count);
+}
+
 async function checkRateLimit(
   kv: KVNamespace,
-  ip: string,
+  identifier: string,
   dailyLimit: number
 ): Promise<{ allowed: boolean; remaining: number }> {
   const today = new Date().toISOString().slice(0, 10);
-  const key = `rl:${ip}:${today}`;
+  const key = `rl:${identifier}:${today}`;
 
   const raw = await kv.get(key);
   const count = raw ? parseInt(raw, 10) : 0;
@@ -45,17 +71,21 @@ export default {
       return new Response(null, { status: 204, headers: CORS_HEADERS });
     }
 
+    const dailyLimit = parseInt(env.DAILY_LIMIT ?? "30", 10);
+    const identifier = getIdentifier(request);
+
+    // --- GET remaining quota endpoint ---
+    if (request.method === "GET") {
+      const remaining = await getRemainingQuota(env.RATE_LIMIT, identifier, dailyLimit);
+      return json({ remaining });
+    }
+
     if (request.method !== "POST") {
       return json({ error: "Method not allowed" }, 405);
     }
 
     // --- Rate limiting ---
-    const ip =
-      request.headers.get("CF-Connecting-IP") ||
-      request.headers.get("X-Forwarded-For") ||
-      "unknown";
-    const dailyLimit = parseInt(env.DAILY_LIMIT ?? "30", 10);
-    const { allowed, remaining } = await checkRateLimit(env.RATE_LIMIT, ip, dailyLimit);
+    const { allowed, remaining } = await checkRateLimit(env.RATE_LIMIT, identifier, dailyLimit);
 
     if (!allowed) {
       return json(
