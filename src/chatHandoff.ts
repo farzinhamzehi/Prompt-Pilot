@@ -4,8 +4,15 @@ import * as vscode from "vscode";
 // Detect which editor we are running in at startup (cached — never changes)
 // ---------------------------------------------------------------------------
 const appName = vscode.env.appName.toLowerCase();
-const isCursor   = appName.includes("cursor");
+const isCursor = appName.includes("cursor");
 const isWindsurf = appName.includes("windsurf");
+
+// ---------------------------------------------------------------------------
+// Note: the command list is intentionally NOT cached. Chat-related extensions
+// (Copilot Chat, Composer, Cascade) can be installed or enabled mid-session,
+// and a stale cache would never see their commands. Enumeration is a cheap
+// in-memory operation that only happens on an explicit user click.
+// ---------------------------------------------------------------------------
 
 // ---------------------------------------------------------------------------
 // sendToChat
@@ -13,21 +20,29 @@ const isWindsurf = appName.includes("windsurf");
 // Goal: open the AI chat panel of the current editor and INSERT the prompt
 //       into the input field WITHOUT auto-submitting. User reviews + presses Enter.
 //
-//  VS Code     → workbench.action.chat.openagent  { query, isPartialQuery: true }
-//                Falls back to workbench.action.chat.open(prompt)
-//
-//  Cursor      → open Composer → clipboard → paste into focused input
-//
-//  Windsurf    → open Cascade → clipboard → paste attempt
-//
-//  Fallback    → clipboard + info message (always works everywhere)
+// Safety rules (step-3 hardening):
+//  - NEVER execute a blind "paste" into whatever element happens to have
+//    focus. A fixed-delay programmatic paste could inject the prompt into the
+//    user's source code if the chat input was not focused yet. Instead, when
+//    no query-capable command exists, we put the prompt on the clipboard and
+//    tell the user to paste it (Ctrl+V / Cmd+V).
+//  - The clipboard is written ONLY when the clipboard path is actually used,
+//    and the user is always told when that happens.
+//  - "chat.open" with a raw string argument is avoided: its behavior varies
+//    across versions and may auto-submit, violating the no-auto-submit rule.
 // ---------------------------------------------------------------------------
 export async function sendToChat(prompt: string): Promise<void> {
   const all = await vscode.commands.getCommands(true);
   const has = (id: string) => all.includes(id);
 
-  if (isCursor)   { await sendToCursor(prompt, has);   return; }
-  if (isWindsurf) { await sendToWindsurf(prompt, has); return; }
+  if (isCursor) {
+    await sendToCursor(prompt, has);
+    return;
+  }
+  if (isWindsurf) {
+    await sendToWindsurf(prompt, has);
+    return;
+  }
   await sendToVSCode(prompt, has);
 }
 
@@ -43,7 +58,7 @@ async function sendToVSCode(
     try {
       await vscode.commands.executeCommand("workbench.action.chat.openagent", {
         query: prompt,
-        isPartialQuery: true,   // ← prevents auto-submit
+        isPartialQuery: true, // ← prevents auto-submit
         focus: true,
       });
       vscode.window.setStatusBarMessage(
@@ -51,19 +66,24 @@ async function sendToVSCode(
         4000
       );
       return;
-    } catch { /* fall through */ }
+    } catch {
+      /* fall through */
+    }
   }
 
-  // Fallback: older VS Code — still pre-fills the input
+  // Legacy path: open the chat panel EMPTY and hand the prompt via clipboard.
   if (has("workbench.action.chat.open")) {
     try {
-      await vscode.commands.executeCommand("workbench.action.chat.open", prompt);
+      await vscode.env.clipboard.writeText(prompt);
+      await vscode.commands.executeCommand("workbench.action.chat.open");
       vscode.window.setStatusBarMessage(
-        "✨ Prompt loaded in Copilot Chat — press Enter to send",
-        4000
+        "✨ Chat opened — paste the prompt with Ctrl+V (already on your clipboard)",
+        6000
       );
       return;
-    } catch { /* fall through */ }
+    } catch {
+      /* fall through */
+    }
   }
 
   await clipboardFallback(prompt);
@@ -89,7 +109,7 @@ async function sendToCursor(
 
   if (openCmd) {
     try {
-      // 1. Try openagent with query first (works if Cursor supports it)
+      // 1. Query-capable command → prefill directly; clipboard untouched
       if (openCmd.includes("chat.open")) {
         await vscode.commands.executeCommand(openCmd, {
           query: prompt,
@@ -103,17 +123,18 @@ async function sendToCursor(
         return;
       }
 
-      // 2. Composer-specific: open panel → clipboard → paste
+      // 2. Composer-specific: open the panel, then clipboard + user pastes.
+      //    No blind programmatic paste — it could land in a source file.
       await vscode.env.clipboard.writeText(prompt);
       await vscode.commands.executeCommand(openCmd);
-      await delay(700); // wait for Composer UI to render and focus
-      await vscode.commands.executeCommand("editor.action.clipboardPasteAction");
       vscode.window.setStatusBarMessage(
-        "✨ Prompt pasted in Cursor Composer — press Enter to send",
-        4000
+        "✨ Composer opened — paste with Ctrl+V (prompt is on your clipboard)",
+        6000
       );
       return;
-    } catch { /* fall through */ }
+    } catch {
+      /* fall through */
+    }
   }
 
   await clipboardFallback(prompt);
@@ -136,9 +157,6 @@ async function sendToWindsurf(
 
   const openCmd = cascadeCmds.find(has);
 
-  // Always copy to clipboard first — Windsurf paste is best-effort
-  await vscode.env.clipboard.writeText(prompt);
-
   if (openCmd) {
     try {
       if (openCmd.includes("chat.open")) {
@@ -147,22 +165,26 @@ async function sendToWindsurf(
           isPartialQuery: true,
           focus: true,
         });
+        vscode.window.setStatusBarMessage(
+          "✨ Prompt loaded — press Enter to send",
+          4000
+        );
       } else {
+        // Clipboard is written ONLY here, when it is actually needed
+        await vscode.env.clipboard.writeText(prompt);
         await vscode.commands.executeCommand(openCmd);
-        await delay(500); 
-        await vscode.commands.executeCommand("editor.action.clipboardPasteAction");
+        vscode.window.setStatusBarMessage(
+          "✨ Cascade opened — paste with Ctrl+V (prompt is on your clipboard)",
+          6000
+        );
       }
-      vscode.window.setStatusBarMessage(
-        "✨ Prompt loaded in Cascade — press Enter to send  (Ctrl+V if needed)",
-        5000
-      );
       return;
-    } catch { /* fall through */ }
+    } catch {
+      /* fall through */
+    }
   }
 
-  vscode.window.showInformationMessage(
-    "✨ Prompt copied — open Cascade (Ctrl+L) and paste with Ctrl+V."
-  );
+  await clipboardFallback(prompt);
 }
 
 // ---------------------------------------------------------------------------
@@ -173,8 +195,4 @@ async function clipboardFallback(prompt: string): Promise<void> {
   vscode.window.showInformationMessage(
     "✨ Prompt copied — open your AI chat and paste with Ctrl+V (or Cmd+V)."
   );
-}
-
-function delay(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
 }

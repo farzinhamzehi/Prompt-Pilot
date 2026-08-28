@@ -78,6 +78,11 @@ export const __state = {
 	warningResponses: [] as (string | undefined)[],
 	warningCalls: [] as { message: string; options?: MessageOptions; items: string[] }[],
 	infoMessages: [] as string[],
+	statusMessages: [] as string[],
+	clipboardText: null as string | null,
+	executedCommands: [] as { id: string; args: unknown[] }[],
+	availableCommands: [] as string[],
+	failingCommands: new Set<string>(),
 	lmModels: [] as unknown[],
 	lmCalls: 0,
 };
@@ -119,25 +124,36 @@ export const window = {
 		__state.warningCalls.push({ message, options, items });
 		return __state.warningResponses.shift();
 	},
-	setStatusBarMessage: (_message: string, _hideAfterMs?: number): Disposable => ({
-		dispose() {},
-	}),
+	setStatusBarMessage: (message: string, _hideAfterMs?: number): Disposable => {
+		__state.statusMessages.push(message);
+		return { dispose() {} };
+	},
 };
 
 export const commands = {
 	registerCommand(_id: string, _handler: (...args: unknown[]) => unknown): Disposable {
 		return { dispose() {} };
 	},
-	executeCommand: async <T = unknown>(_id: string, ..._args: unknown[]): Promise<T | undefined> =>
-		undefined,
-	getCommands: async (_filterInternal?: boolean): Promise<string[]> => [],
+	executeCommand: async <T = unknown>(id: string, ...args: unknown[]): Promise<T | undefined> => {
+		__state.executedCommands.push({ id, args });
+		if (__state.failingCommands.has(id)) {
+			throw new Error(`command failed: ${id}`);
+		}
+		return undefined;
+	},
+	getCommands: async (_filterInternal?: boolean): Promise<string[]> => [
+		...__state.availableCommands,
+	],
 };
 
 export const env = {
-	appName: "Visual Studio Code",
+	// Tests override the editor via TEST_APP_NAME (read once at module load).
+	appName: ((globalThis as any).process?.env?.TEST_APP_NAME as string) ?? "Visual Studio Code",
 	machineId: "test-machine-1",
 	clipboard: {
-		writeText: async (_text: string): Promise<void> => {},
+		writeText: async (text: string): Promise<void> => {
+			__state.clipboardText = text;
+		},
 	},
 };
 
