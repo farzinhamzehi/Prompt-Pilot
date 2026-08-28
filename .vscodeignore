@@ -30,3 +30,6 @@ icon.png
 
 # Source maps (not needed in production VSIX)
 dist/*.map
+
+# Tests (dev-only -- never shipped in the .vsix)
+test/

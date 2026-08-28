@@ -28,7 +28,7 @@ export interface ImproveResult {
 }
 
 export class LlmService {
-  constructor(private readonly context: vscode.ExtensionContext) {}
+  constructor(private readonly context: vscode.ExtensionContext) { }
 
   /**
    * Main entry point. Tries 3 tiers in order:
@@ -38,13 +38,21 @@ export class LlmService {
    */
   async improve(draft: string, preset: PresetId): Promise<ImproveResult> {
     const userMsg = buildUserMessage(draft, preset);
+    const provider =
+      vscode.workspace.getConfiguration("promptImprover").get<string>("userProvider") ??
+      "openai";
+    const isLocalProvider = provider === "ollama";
 
     // ── Tier 1: vscode.lm ──────────────────────────────────────────────────
-    try {
-      const result = await this.tryVscodeLm(userMsg);
-      if (result) return { improved: result };
-    } catch {
-      // Not available — fall through
+    // Skipped entirely for local-provider users: vscode.lm is a cloud service
+    // (Copilot), which would silently defeat choosing Ollama for privacy.
+    if (!isLocalProvider) {
+      try {
+        const result = await this.tryVscodeLm(userMsg);
+        if (result) return { improved: result };
+      } catch {
+        // Not available — fall through
+      }
     }
 
     // ── Tier 2: User's own API key ─────────────────────────────────────────
@@ -54,15 +62,54 @@ export class LlmService {
         const result = await this.tryUserKey(apiKey, userMsg);
         if (result) return { improved: result };
       } catch (err) {
-        // Key may be wrong; show a helpful error and fall through to proxy
-        void vscode.window.showWarningMessage(
-          `Prompt Improver: Your API key failed (${String(err)}). Falling back to free proxy.`
-        );
+        // PRIVACY: never silently fall back to the cloud after a configured
+        // (possibly local/private) path fails — ask for consent first.
+        const consent = await this.askCloudFallbackConsent(provider, err);
+        if (!consent) {
+          throw new Error(
+            `Improvement cancelled: your ${provider} request failed and the prompt was NOT sent anywhere else. Fix the provider or approve the cloud fallback when asked.`
+          );
+        }
       }
     }
 
     // ── Tier 3: Hosted proxy ───────────────────────────────────────────────
     return this.tryProxy(userMsg);
+  }
+
+  // ── Cloud-fallback consent ────────────────────────────────────────────────
+
+  /**
+   * Asks the user before a prompt leaves the configured provider for the
+   * hosted cloud proxy. Returns true only on explicit consent.
+   * The "Always Allow" choice persists via `promptImprover.allowCloudFallback`.
+   */
+  private async askCloudFallbackConsent(provider: string, err: unknown): Promise<boolean> {
+    const cfg = vscode.workspace.getConfiguration("promptImprover");
+    if (cfg.get<boolean>("allowCloudFallback") === true) return true;
+
+    const privacyNote =
+      provider === "ollama"
+        ? "You chose Ollama for local, private use. If you continue, THIS prompt will be sent to the hosted cloud proxy (Cloudflare Workers AI) instead of staying on this machine."
+        : "If you continue, this prompt will be sent to the hosted cloud proxy instead of your configured provider.";
+
+    const USE_ONCE = "Use Cloud Proxy This Time";
+    const ALWAYS = "Always Allow Cloud Fallback";
+    const choice = await vscode.window.showWarningMessage(
+      `Prompt Improver: your ${provider} request failed.`,
+      {
+        modal: true,
+        detail: `Error: ${err instanceof Error ? err.message : String(err)}\n\n${privacyNote}\n\nNothing has been sent to the cloud yet.`,
+      },
+      USE_ONCE,
+      ALWAYS
+    );
+
+    if (choice === ALWAYS) {
+      await cfg.update("allowCloudFallback", true, vscode.ConfigurationTarget.Global);
+      return true;
+    }
+    return choice === USE_ONCE;
   }
 
   // ── Tier 1 ────────────────────────────────────────────────────────────────

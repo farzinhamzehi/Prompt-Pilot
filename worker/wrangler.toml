@@ -12,4 +12,18 @@ id = "036bb886ddad4153a4baec7f4a8f024d"
 [vars]
 DAILY_LIMIT = "30"
 
-# No external API key needed — uses Cloudflare AI binding
+# ---------------------------------------------------------------------------
+# Optional overrides (defaults live in index.ts — uncomment to change):
+#
+# GLOBAL_DAILY_LIMIT = "20000"
+#   Circuit breaker: total requests per day across ALL users. Bounds your
+#   Cloudflare AI cost no matter what happens.
+#
+# CF_MODEL = "@cf/meta/llama-3.2-3b-instruct"
+#   Switch back to the cheaper/faster 3B model if you prefer cost over quality.
+#   Default is now "@cf/meta/llama-3.3-70b-instruct-fp8-fast" (much better
+#   instruction-following for structured prompt rewrites).
+#
+# SYSTEM_PROMPT = "..."
+#   Override the built-in system prompt without touching the code.
+# ---------------------------------------------------------------------------
