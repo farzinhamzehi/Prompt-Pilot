@@ -15,10 +15,13 @@
 				"./vscode-mock.ts"
 			]
 		},
-		"types": []
+		"types": [
+			"node"
+		]
 	},
 	"include": [
 		"./vscode-mock.ts",
+		"./*.test.mts",
 		"../src/**/*.ts"
 	]
 }

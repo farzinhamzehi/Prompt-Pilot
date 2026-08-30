@@ -453,8 +453,11 @@ export class PromptPanelProvider implements vscode.WebviewViewProvider {
       setLoading(false);
       const errDiv = $("error");
       if (msg.message && msg.message.includes("limit reached")) {
-        errDiv.innerHTML = msg.message +
-          ' <a onclick="document.getElementById(\\'setKey\\').click()">Add your own key →</a>';
+        errDiv.textContent = msg.message + " ";
+        const link = document.createElement("a");
+        link.textContent = "Add your own key →";
+        link.addEventListener("click", () => $("setKey").click());
+        errDiv.appendChild(link);
       } else {
         errDiv.textContent = msg.message || "An error occurred.";
       }
