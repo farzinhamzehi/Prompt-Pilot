@@ -18,6 +18,40 @@ interface AnthropicResponse {
   content: { type: string; text: string }[];
 }
 
+/** Thrown when the hosted proxy reports the daily free-tier limit (HTTP 429).
+ *  This typed error — not message text — is the structured contract the UI
+ *  uses to decide whether to show the "Add your own key" link. */
+export class RateLimitError extends Error {
+  constructor(
+    message: string,
+    public readonly remaining = 0
+  ) {
+    super(message);
+    this.name = "RateLimitError";
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Timeouts — no network call may hang the UI forever. Mutable so tests can
+// shrink the budgets.
+// ---------------------------------------------------------------------------
+export const TIMEOUTS = {
+  llmMs: 90_000,
+  quotaMs: 10_000,
+};
+
+/** Thrown when a network call exceeds its time budget. */
+export class HttpTimeoutError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "HttpTimeoutError";
+  }
+}
+
+function isTimeoutError(err: unknown): boolean {
+  return err instanceof Error && err.name === "TimeoutError";
+}
+
 // ---------------------------------------------------------------------------
 // LlmService
 // ---------------------------------------------------------------------------
@@ -25,10 +59,12 @@ interface AnthropicResponse {
 export interface ImproveResult {
   improved: string;
   remaining?: number;
+  /** Daily limit reported by the proxy (drives the dynamic "N/M" badge). */
+  limit?: number;
 }
 
 export class LlmService {
-  constructor(private readonly context: vscode.ExtensionContext) {}
+  constructor(private readonly context: vscode.ExtensionContext) { }
 
   /**
    * Main entry point. Tries 3 tiers in order:
@@ -38,13 +74,21 @@ export class LlmService {
    */
   async improve(draft: string, preset: PresetId): Promise<ImproveResult> {
     const userMsg = buildUserMessage(draft, preset);
+    const provider =
+      vscode.workspace.getConfiguration("promptImprover").get<string>("userProvider") ??
+      "openai";
+    const isLocalProvider = provider === "ollama";
 
     // ── Tier 1: vscode.lm ──────────────────────────────────────────────────
-    try {
-      const result = await this.tryVscodeLm(userMsg);
-      if (result) return { improved: result };
-    } catch {
-      // Not available — fall through
+    // Skipped entirely for local-provider users: vscode.lm is a cloud service
+    // (Copilot), which would silently defeat choosing Ollama for privacy.
+    if (!isLocalProvider) {
+      try {
+        const result = await this.tryVscodeLm(userMsg);
+        if (result) return { improved: result };
+      } catch {
+        // Not available — fall through
+      }
     }
 
     // ── Tier 2: User's own API key ─────────────────────────────────────────
@@ -54,15 +98,74 @@ export class LlmService {
         const result = await this.tryUserKey(apiKey, userMsg);
         if (result) return { improved: result };
       } catch (err) {
-        // Key may be wrong; show a helpful error and fall through to proxy
-        void vscode.window.showWarningMessage(
-          `Prompt Improver: Your API key failed (${String(err)}). Falling back to free proxy.`
-        );
+        // PRIVACY: never silently fall back to the cloud after a configured
+        // (possibly local/private) path fails — ask for consent first.
+        const consent = await this.askCloudFallbackConsent(provider, err);
+        if (!consent) {
+          throw new Error(
+            `Improvement cancelled: your ${provider} request failed and the prompt was NOT sent anywhere else. Fix the provider or approve the cloud fallback when asked.`
+          );
+        }
       }
     }
 
     // ── Tier 3: Hosted proxy ───────────────────────────────────────────────
     return this.tryProxy(userMsg);
+  }
+
+  // ── Cloud-fallback consent ────────────────────────────────────────────────
+
+  /**
+   * Asks the user before a prompt leaves the configured provider for the
+   * hosted cloud proxy. Returns true only on explicit consent.
+   * The "Always Allow" choice persists via `promptImprover.allowCloudFallback`.
+   */
+  private async askCloudFallbackConsent(provider: string, err: unknown): Promise<boolean> {
+    const cfg = vscode.workspace.getConfiguration("promptImprover");
+    if (cfg.get<boolean>("allowCloudFallback") === true) return true;
+
+    const privacyNote =
+      provider === "ollama"
+        ? "You chose Ollama for local, private use. If you continue, THIS prompt will be sent to the hosted cloud proxy (Cloudflare Workers AI) instead of staying on this machine."
+        : "If you continue, this prompt will be sent to the hosted cloud proxy instead of your configured provider.";
+
+    const USE_ONCE = "Use Cloud Proxy This Time";
+    const ALWAYS = "Always Allow Cloud Fallback";
+    const choice = await vscode.window.showWarningMessage(
+      `Prompt Improver: your ${provider} request failed.`,
+      {
+        modal: true,
+        detail: `Error: ${err instanceof Error ? err.message : String(err)}\n\n${privacyNote}\n\nNothing has been sent to the cloud yet.`,
+      },
+      USE_ONCE,
+      ALWAYS
+    );
+
+    if (choice === ALWAYS) {
+      await cfg.update("allowCloudFallback", true, vscode.ConfigurationTarget.Global);
+      return true;
+    }
+    return choice === USE_ONCE;
+  }
+
+  // ── Network timeout wrapper ───────────────────────────────────────────────
+
+  /**
+   * fetch with a hard time budget — a hung connection must never leave the
+   * Improve button spinning forever.
+   */
+  private async fetchWithTimeout(
+    url: string,
+    init: RequestInit,
+    timeoutMs: number,
+    timeoutMessage: string
+  ): Promise<Response> {
+    try {
+      return await fetch(url, { ...init, signal: AbortSignal.timeout(timeoutMs) });
+    } catch (err) {
+      if (isTimeoutError(err)) throw new HttpTimeoutError(timeoutMessage);
+      throw err;
+    }
   }
 
   // ── Tier 1 ────────────────────────────────────────────────────────────────
@@ -86,14 +189,28 @@ export class LlmService {
     ];
 
     const tokenSource = new vscode.CancellationTokenSource();
-    const response = await model.sendRequest(messages, {}, tokenSource.token);
+    // Bound the wait: cancel the request if the model stalls, and always
+    // dispose the token source (the original code leaked it).
+    let timedOut = false;
+    const watchdog = setTimeout(() => {
+      timedOut = true;
+      tokenSource.cancel();
+    }, TIMEOUTS.llmMs);
+    try {
+      const response = await model.sendRequest(messages, {}, tokenSource.token);
 
-    let text = "";
-    for await (const chunk of response.text) {
-      text += chunk;
+      let text = "";
+      for await (const chunk of response.text) {
+        text += chunk;
+      }
+
+      // A cancelled stream can end early with partial text — never use it.
+      if (timedOut) return null;
+      return text.trim() || null;
+    } finally {
+      clearTimeout(watchdog);
+      tokenSource.dispose();
     }
-
-    return text.trim() || null;
   }
 
   // ── Tier 2 ────────────────────────────────────────────────────────────────
@@ -107,7 +224,7 @@ export class LlmService {
       this.defaultBaseUrl(provider);
 
     if (provider === "anthropic") {
-      return this.callAnthropic(apiKey, model, userMsg);
+      return this.callAnthropic(baseUrl, apiKey, model, userMsg);
     }
 
     // OpenAI-compatible (openai / groq / ollama / custom)
@@ -125,14 +242,19 @@ export class LlmService {
       { role: "user", content: userMsg },
     ];
 
-    const res = await fetch(`${baseUrl}/chat/completions`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${apiKey}`,
+    const res = await this.fetchWithTimeout(
+      `${baseUrl}/chat/completions`,
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${apiKey}`,
+        },
+        body: JSON.stringify({ model, messages, temperature: 0.4, max_tokens: 2048 }),
       },
-      body: JSON.stringify({ model, messages, temperature: 0.4, max_tokens: 2048 }),
-    });
+      TIMEOUTS.llmMs,
+      "The provider API took too long to respond. Please try again."
+    );
 
     if (!res.ok) {
       const text = await res.text();
@@ -146,24 +268,30 @@ export class LlmService {
   }
 
   private async callAnthropic(
+    baseUrl: string,
     apiKey: string,
     model: string,
     userMsg: string
   ): Promise<string> {
-    const res = await fetch("https://api.anthropic.com/v1/messages", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "x-api-key": apiKey,
-        "anthropic-version": "2023-06-01",
+    const res = await this.fetchWithTimeout(
+      `${baseUrl}/v1/messages`,
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "x-api-key": apiKey,
+          "anthropic-version": "2023-06-01",
+        },
+        body: JSON.stringify({
+          model,
+          max_tokens: 2048,
+          system: SYSTEM_PROMPT,
+          messages: [{ role: "user", content: userMsg }],
+        }),
       },
-      body: JSON.stringify({
-        model,
-        max_tokens: 2048,
-        system: SYSTEM_PROMPT,
-        messages: [{ role: "user", content: userMsg }],
-      }),
-    });
+      TIMEOUTS.llmMs,
+      "The Anthropic API took too long to respond. Please try again."
+    );
 
     if (!res.ok) {
       const text = await res.text();
@@ -179,23 +307,32 @@ export class LlmService {
   /**
    * Fetches remaining daily quota from the proxy server without consuming a prompt count.
    */
-  async getQuota(): Promise<number | null> {
+  async getQuota(): Promise<{ remaining: number; limit?: number } | null> {
     const cfg = vscode.workspace.getConfiguration("promptImprover");
     const proxyUrl =
       cfg.get<string>("proxyUrl") ||
       "https://promptpilot-proxy.5farzinhamzei.workers.dev/improve";
 
     try {
-      const res = await fetch(proxyUrl, {
-        method: "GET",
-        headers: {
-          "X-Machine-ID": vscode.env.machineId,
+      const res = await this.fetchWithTimeout(
+        proxyUrl,
+        {
+          method: "GET",
+          headers: {
+            "X-Machine-ID": vscode.env.machineId,
+          },
         },
-      });
+        TIMEOUTS.quotaMs,
+        "The quota check took too long."
+      );
 
       if (!res.ok) return null;
-      const data = (await res.json()) as { remaining?: number };
-      return typeof data.remaining === "number" ? data.remaining : null;
+      const data = (await res.json()) as { remaining?: number; limit?: number };
+      if (typeof data.remaining !== "number") return null;
+      return {
+        remaining: data.remaining,
+        limit: typeof data.limit === "number" ? data.limit : undefined,
+      };
     } catch {
       return null;
     }
@@ -211,31 +348,48 @@ export class LlmService {
 
     let res: Response;
     try {
-      res = await fetch(proxyUrl, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "X-Machine-ID": vscode.env.machineId,
+      res = await this.fetchWithTimeout(
+        proxyUrl,
+        {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "X-Machine-ID": vscode.env.machineId,
+          },
+          body: JSON.stringify({ systemPrompt: SYSTEM_PROMPT, userMessage: userMsg }),
         },
-        body: JSON.stringify({ systemPrompt: SYSTEM_PROMPT, userMessage: userMsg }),
-      });
-    } catch {
+        TIMEOUTS.llmMs,
+        "The improvement service took too long to respond. Please try again."
+      );
+    } catch (err) {
+      if (err instanceof HttpTimeoutError) throw err; // already a friendly message
       throw new Error(
         "Cannot reach the improvement service. Check your internet connection."
       );
     }
 
     if (res.status === 429) {
-      const data = (await res.json()) as { error: string };
-      throw new Error(data.error);
+      const data = (await res.json()) as {
+        error?: string;
+        code?: string;
+        remaining?: number;
+      };
+      throw new RateLimitError(
+        data.error ?? "Free tier limit reached. Add your own API key for unlimited use.",
+        typeof data.remaining === "number" ? data.remaining : 0
+      );
     }
 
     if (!res.ok) {
       throw new Error(`Proxy error ${res.status}. Please try again.`);
     }
 
-    const data = (await res.json()) as { improved: string; remaining: number };
-    return { improved: data.improved, remaining: data.remaining };
+    const data = (await res.json()) as {
+      improved: string;
+      remaining: number;
+      limit?: number;
+    };
+    return { improved: data.improved, remaining: data.remaining, limit: data.limit };
   }
 
   // ── Helpers ───────────────────────────────────────────────────────────────
@@ -254,6 +408,7 @@ export class LlmService {
     const urls: Record<string, string> = {
       openai: "https://api.openai.com/v1",
       groq: "https://api.groq.com/openai/v1",
+      anthropic: "https://api.anthropic.com",
       ollama: "http://localhost:11434/v1",
     };
     return urls[provider] ?? "https://api.openai.com/v1";

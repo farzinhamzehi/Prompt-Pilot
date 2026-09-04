@@ -1,5 +1,6 @@
 import * as vscode from "vscode";
 import { PromptPanelProvider } from "./PromptPanelProvider";
+import { clearApiKeyAndSettings } from "./apiKeys";
 
 export function activate(context: vscode.ExtensionContext) {
   const provider = new PromptPanelProvider(context);
@@ -9,10 +10,6 @@ export function activate(context: vscode.ExtensionContext) {
       PromptPanelProvider.viewId,
       provider,
       { webviewOptions: { retainContextWhenHidden: false } }
-    ),
-
-    vscode.commands.registerCommand("promptImprover.focus", () =>
-      vscode.commands.executeCommand("promptImprover.panel.focus")
     ),
 
     // ── Set API Key command ──────────────────────────────────────────────────
@@ -83,9 +80,9 @@ export function activate(context: vscode.ExtensionContext) {
 
     // ── Remove API Key command ───────────────────────────────────────────────
     vscode.commands.registerCommand("promptImprover.removeApiKey", async () => {
-      await context.secrets.delete("promptImprover.apiKey");
+      await clearApiKeyAndSettings(context);
       vscode.window.showInformationMessage(
-        "API key removed. Prompt Improver will use the free proxy."
+        "API key and provider settings removed. Prompt Improver will use the free proxy."
       );
     })
   );

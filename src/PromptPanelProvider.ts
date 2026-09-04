@@ -1,6 +1,7 @@
 import * as vscode from "vscode";
 import { sendToChat } from "./chatHandoff";
-import { LlmService } from "./llm/LlmService";
+import { clearApiKeyAndSettings } from "./apiKeys";
+import { LlmService, RateLimitError } from "./llm/LlmService";
 import { PresetId, PRESETS, validatePrompt } from "./core/improvementEngine";
 
 interface ImproveOptions {
@@ -13,7 +14,15 @@ type WebviewMsg =
   | { type: "improve"; prompt: string; preset: PresetId; options: ImproveOptions }
   | { type: "send"; prompt: string }
   | { type: "copy"; prompt: string }
-  | { type: "setKey" };
+  | { type: "setKey" }
+  | { type: "removeKey" };
+
+// Messages the extension host posts INTO the webview.
+type HostMsg =
+  | { type: "quota"; remaining: number; limit?: number }
+  | { type: "result"; improved: string; remaining?: number; limit?: number }
+  | { type: "error"; message: string; rateLimited?: boolean }
+  | { type: "keystate"; hasKey: boolean };
 
 // ---------------------------------------------------------------------------
 // Appends deterministic instructions to the improved prompt based on checkboxes
@@ -60,11 +69,42 @@ export class PromptPanelProvider implements vscode.WebviewViewProvider {
     view.webview.html = this.html(view.webview);
 
     // Fetch current remaining quota for this machine ID asynchronously and sync UI
-    void this.llm.getQuota().then((remaining) => {
-      if (typeof remaining === "number") {
-        void view.webview.postMessage({ type: "quota", remaining });
+    void this.llm.getQuota().then((quota) => {
+      if (quota) {
+        void view.webview.postMessage({
+          type: "quota",
+          remaining: quota.remaining,
+          limit: quota.limit,
+        });
       }
     });
+
+    // Advertise whether an own key is configured (drives the Remove Key button)
+    void this.context.secrets.get("promptImprover.apiKey").then((key) => {
+      void view.webview.postMessage({ type: "keystate", hasKey: !!key });
+    });
+
+    // Deliver a result that arrived while the panel was hidden: with
+    // retainContextWhenHidden:false the webview is destroyed on hide and its
+    // postMessage would have been dropped — the quota-paid result is stashed
+    // instead (see the improve handler below).
+    const pending = this.context.workspaceState.get("promptImprover.pendingResult") as
+      | { improved: string; remaining?: number; limit?: number }
+      | undefined;
+    if (pending) {
+      void view.webview
+        .postMessage({
+          type: "result",
+          improved: pending.improved,
+          remaining: pending.remaining,
+          limit: pending.limit,
+        })
+        .then((delivered) => {
+          if (delivered) {
+            void this.context.workspaceState.update("promptImprover.pendingResult", undefined);
+          }
+        });
+    }
 
     view.webview.onDidReceiveMessage(async (msg: WebviewMsg) => {
       switch (msg.type) {
@@ -81,16 +121,30 @@ export class PromptPanelProvider implements vscode.WebviewViewProvider {
           try {
             const result = await this.llm.improve(msg.prompt, msg.preset);
             const improved = applyOptions(result.improved, msg.options);
-            view.webview.postMessage({
+            const delivered = await view.webview.postMessage({
               type: "result",
               improved,
               remaining: result.remaining,
+              limit: result.limit,
             });
+            if (!delivered) {
+              // Panel hidden mid-request → webview destroyed, message dropped.
+              // Stash the (quota-paid) result for the next resolve instead of
+              // losing it.
+              await this.context.workspaceState.update("promptImprover.pendingResult", {
+                improved,
+                remaining: result.remaining,
+                limit: result.limit,
+              });
+            }
           } catch (err) {
-            view.webview.postMessage({
+            const hostMsg: HostMsg = {
               type: "error",
               message: err instanceof Error ? err.message : String(err),
-            });
+              // Structured flag — the webview keys off this, never message text.
+              rateLimited: err instanceof RateLimitError,
+            };
+            view.webview.postMessage(hostMsg);
           }
           break;
         }
@@ -103,7 +157,31 @@ export class PromptPanelProvider implements vscode.WebviewViewProvider {
           break;
         case "setKey":
           await vscode.commands.executeCommand("promptImprover.setApiKey");
+          // Reflect the (possibly new) key state in the panel
+          view.webview.postMessage({
+            type: "keystate",
+            hasKey: !!(await this.context.secrets.get("promptImprover.apiKey")),
+          });
           break;
+        case "removeKey": {
+          const CONFIRM = "Remove";
+          const choice = await vscode.window.showWarningMessage(
+            "Prompt Improver: remove your API key?",
+            {
+              modal: true,
+              detail:
+                "The key and your provider settings (provider, model, base URL, cloud-fallback consent) will be cleared. The free proxy tier remains available.",
+            },
+            CONFIRM
+          );
+          if (choice !== CONFIRM) break;
+          await clearApiKeyAndSettings(this.context);
+          view.webview.postMessage({ type: "keystate", hasKey: false });
+          vscode.window.showInformationMessage(
+            "Prompt Improver: API key removed. The free proxy tier is active."
+          );
+          break;
+        }
       }
     });
   }
@@ -331,10 +409,11 @@ export class PromptPanelProvider implements vscode.WebviewViewProvider {
     <button id="send" class="primary">➤ Send to chat</button>
     <button id="copy" class="secondary">Copy</button>
     <button id="setKey" class="secondary" title="Add your own API key for unlimited use">🔑 API Key</button>
+    <button id="removeKey" class="secondary" title="Remove your API key and provider settings" style="display:none">🗑 Remove Key</button>
   </div>
 
   <div id="status"></div>
-  <div id="quota">⚡ 30/30 remaining prompts</div>
+  <div id="quota">⚡ …</div>
   <div id="error"></div>
 
 <script nonce="${nonce}">
@@ -433,28 +512,39 @@ export class PromptPanelProvider implements vscode.WebviewViewProvider {
     if (prompt) vscode.postMessage({ type: "copy", prompt });
   };
   $("setKey").onclick = () => vscode.postMessage({ type: "setKey" });
+  $("removeKey").onclick = () => vscode.postMessage({ type: "removeKey" });
 
   // ── Messages from host ─────────────────────────────────────────────────────
   window.addEventListener("message", e => {
     const msg = e.data;
+    // Dynamic label: use the server-provided limit when present, else no total.
+    const quotaLabel = (remaining, limit) =>
+      "⚡ " + remaining + (typeof limit === "number" ? "/" + limit : "") + " remaining prompts";
+
     if (msg.type === "quota") {
       if (typeof msg.remaining === "number") {
-        $("quota").textContent = "⚡ " + msg.remaining + "/30 remaining prompts";
+        $("quota").textContent = quotaLabel(msg.remaining, msg.limit);
         save();
       }
     } else if (msg.type === "result") {
       $("output").value = msg.improved;
       if (typeof msg.remaining === "number") {
-        $("quota").textContent = "⚡ " + msg.remaining + "/30 remaining prompts";
+        $("quota").textContent = quotaLabel(msg.remaining, msg.limit);
       }
       setLoading(false);
       save();
+    } else if (msg.type === "keystate") {
+      $("removeKey").style.display = msg.hasKey ? "inline-block" : "none";
     } else if (msg.type === "error") {
       setLoading(false);
       const errDiv = $("error");
-      if (msg.message && msg.message.includes("limit reached")) {
-        errDiv.innerHTML = msg.message +
-          ' <a onclick="document.getElementById(\\'setKey\\').click()">Add your own key →</a>';
+      // Structured flag from the host — never string matching on the message.
+      if (msg.rateLimited === true) {
+        errDiv.textContent = msg.message + " ";
+        const link = document.createElement("a");
+        link.textContent = "Add your own key →";
+        link.addEventListener("click", () => $("setKey").click());
+        errDiv.appendChild(link);
       } else {
         errDiv.textContent = msg.message || "An error occurred.";
       }

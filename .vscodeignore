@@ -30,3 +30,10 @@ icon.png
 
 # Source maps (not needed in production VSIX)
 dist/*.map
+
+# Tests (dev-only -- never shipped in the .vsix)
+test/
+
+# Never ship built packages or the 1.6MB source photo inside the .vsix
+*.vsix
+public/sidebar.jpg

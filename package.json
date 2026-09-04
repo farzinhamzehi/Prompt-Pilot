@@ -2,7 +2,7 @@
   "name": "promptpilot",
   "displayName": "PromptPilot",
   "description": "Improve your AI agent prompts instantly — works in VS Code, Cursor, Windsurf, and any editor. Zero setup required.",
-  "version": "0.1.6",
+  "version": "0.2.0",
   "publisher": "farzinhamzehi",
   "icon": "public/market.jpg",
   "license": "MIT",
@@ -11,8 +11,19 @@
     "url": "https://github.com/farzinhamzehi/Prompt-Pilot.git"
   },
   "homepage": "https://github.com/farzinhamzehi/Prompt-Pilot#readme",
-  "bugs": { "url": "https://github.com/farzinhamzehi/Prompt-Pilot/issues" },
-  "keywords": ["ai", "prompt", "copilot", "cursor", "llm", "agent", "improve", "chat"],
+  "bugs": {
+    "url": "https://github.com/farzinhamzehi/Prompt-Pilot/issues"
+  },
+  "keywords": [
+    "ai",
+    "prompt",
+    "copilot",
+    "cursor",
+    "llm",
+    "agent",
+    "improve",
+    "chat"
+  ],
   "galleryBanner": {
     "color": "#1e1e2e",
     "theme": "dark"
@@ -34,7 +45,7 @@
         {
           "id": "promptImprover",
           "title": "PromptPilot",
-          "icon": "public/sidebar.svg"
+          "icon": "public/sidebar-icon.png"
         }
       ]
     },
@@ -44,7 +55,7 @@
           "type": "webview",
           "id": "promptImprover.panel",
           "name": "PromptPilot",
-          "icon": "public/sidebar.svg"
+          "icon": "public/sidebar-icon.png"
         }
       ]
     },
@@ -53,7 +64,13 @@
       "properties": {
         "promptImprover.userProvider": {
           "type": "string",
-          "enum": ["openai", "groq", "anthropic", "ollama", "custom"],
+          "enum": [
+            "openai",
+            "groq",
+            "anthropic",
+            "ollama",
+            "custom"
+          ],
           "default": "openai",
           "description": "Your API provider (only used if you have set an API key via 'PromptPilot: Set API Key')."
         },
@@ -71,6 +88,11 @@
           "type": "string",
           "default": "",
           "description": "Override the hosted proxy URL (advanced). Leave blank to use the default free proxy."
+        },
+        "promptImprover.allowCloudFallback": {
+          "type": "boolean",
+          "default": false,
+          "description": "When your own API key/provider fails, fall back to the free cloud proxy without asking. Default (off): you are asked each time before a prompt leaves the configured provider."
         }
       }
     },
@@ -94,6 +116,7 @@
   },
   "scripts": {
     "build": "node esbuild.js",
+    "test": "node test/run-all.mjs",
     "watch": "node esbuild.js --watch",
     "vscode:prepublish": "node esbuild.js --production",
     "package": "vsce package",
@@ -105,6 +128,7 @@
     "@types/node": "^20.x",
     "@vscode/vsce": "^3.0.0",
     "esbuild": "^0.21.0",
-    "typescript": "^5.4.0"
+    "typescript": "^5.4.0",
+    "tsx": "^4.19.0"
   }
 }

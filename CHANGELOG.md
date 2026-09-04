@@ -7,6 +7,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.2.0] - 2026-09-04
+
+### Security
+- **Hardened the free proxy**: system prompt now lives only on the server, CORS restricted to VS Code webviews, per-machine + per-IP + global daily limits, quota consumed only on success, request-size pre-filter (413).
+- **Consent before cloud fallback**: if your own key/provider fails (including local Ollama), you are explicitly asked before a prompt is sent to the cloud proxy; `promptImprover.allowCloudFallback` persists an "always allow" choice.
+- **Structured rate-limit contract**: `RATE_LIMITED` code + typed `RateLimitError` + `rateLimited` flag replace matching on message text; webview error rendering is DOM-safe (no innerHTML).
+- **Safe chat handoff**: sending to the editor's AI chat no longer blind-pastes; the clipboard is written only when needed, always with a visible notice.
+
+### Added
+- **Network timeouts everywhere** (LLM 90s, quota 10s) — the Improve button can never spin forever; Tier-1 token sources are cancelled and disposed (leak fixed).
+- **Result stash**: improved prompts that complete while the panel is hidden are kept and delivered on the next open — paid quota is never lost.
+- **Dynamic quota badge**: shows the real server limit (`N/M`) instead of a hardcoded 30.
+- **Anthropic `userBaseUrl`**: custom gateways/proxies now work for Anthropic too.
+- **Remove Key button**: the panel shows a 🗑 Remove Key button whenever an own key is configured (with a confirmation dialog) — removing the key also clears provider settings and stored cloud consent.
+- **Testing**: full offline suite — 8 suites, 142 checks via `npm test` — plus GitHub Actions CI on every push.
+
+### Changed
+- **Proxy model upgraded** to Llama 3.3 70B (`max_tokens` 4096, temp 0.25) with strict preservation rules — file names and line markers like `L4-21` are kept verbatim.
+- **New sidebar icon** derived from `sidebar.jpg` as a transparent PNG (the opaque JPG rendered as a gray square in the activity bar).
+- **Remove API Key** now also clears provider settings and stored cloud consent.
+
+### Removed
+- Dead `promptImprover.focus` command registration.
+
+---
+
 ## [0.1.6] - 2026-08-22
 
 ### Fixed
