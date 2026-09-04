@@ -73,22 +73,32 @@ export interface MessageOptions {
 
 // ---- mutable test state (shared by the test file and the code under test) ----
 
-export const __state = {
-	config: new Map<string, unknown>(),
-	warningResponses: [] as (string | undefined)[],
-	warningCalls: [] as { message: string; options?: MessageOptions; items: string[] }[],
-	infoMessages: [] as string[],
-	statusMessages: [] as string[],
-	clipboardText: null as string | null,
-	executedCommands: [] as { id: string; args: unknown[] }[],
-	availableCommands: [] as string[],
-	failingCommands: new Set<string>(),
-	registeredCommands: new Map<string, (...args: unknown[]) => unknown>(),
-	tokenSourcesCreated: 0,
-	tokenSourcesDisposed: 0,
-	lmModels: [] as unknown[],
-	lmCalls: 0,
-};
+// State lives on globalThis as a singleton: some runners (certain tsx / Node
+// loader combinations, e.g. GitHub Actions) can end up with two module records
+// for this file — one per import chain — so module-level state would silently
+// split and tests would fail only there. With the state on the global object,
+// every importer still sees and mutates the SAME state, on every runner.
+function createState() {
+	return {
+		config: new Map<string, unknown>(),
+		warningResponses: [] as (string | undefined)[],
+		warningCalls: [] as { message: string; options?: MessageOptions; items: string[] }[],
+		infoMessages: [] as string[],
+		statusMessages: [] as string[],
+		clipboardText: null as string | null,
+		executedCommands: [] as { id: string; args: unknown[] }[],
+		availableCommands: [] as string[],
+		failingCommands: new Set<string>(),
+		registeredCommands: new Map<string, (...args: unknown[]) => unknown>(),
+		tokenSourcesCreated: 0,
+		tokenSourcesDisposed: 0,
+		lmModels: [] as unknown[],
+		lmCalls: 0,
+	};
+}
+
+const g = globalThis as { __VSCODE_MOCK_STATE__?: ReturnType<typeof createState> };
+export const __state = (g.__VSCODE_MOCK_STATE__ ??= createState());
 
 export const workspace = {
 	getConfiguration(section?: string): WorkspaceConfiguration {
