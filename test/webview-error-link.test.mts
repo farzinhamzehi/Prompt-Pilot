@@ -79,7 +79,7 @@ function makeEl(id: string): MockEl {
 
 const IDS = [
 	"input", "output", "opt-plan", "opt-commit", "opt-push", "push-row",
-	"improve", "send", "copy", "setKey", "status", "quota", "error",
+	"improve", "send", "copy", "setKey", "removeKey", "status", "quota", "error",
 ];
 const els: Record<string, MockEl> = Object.fromEntries(IDS.map((id) => [id, makeEl(id)]));
 
@@ -227,6 +227,26 @@ check(
 	"quota message without limit renders 'N' only",
 	els.quota.textContent === "⚡ 5 remaining prompts",
 	els.quota.textContent
+);
+
+// Scenario 7: keystate toggles the Remove Key button; clicking it posts removeKey
+messageHandler!({ data: { type: "keystate", hasKey: true } });
+check(
+	"keystate=true shows the Remove Key button",
+	els.removeKey.style.display === "inline-block",
+	els.removeKey.style.display
+);
+els.removeKey.click();
+check(
+	"Remove Key click posts {type:'removeKey'} to the host",
+	posted.some((m: any) => m?.type === "removeKey"),
+	posted
+);
+messageHandler!({ data: { type: "keystate", hasKey: false } });
+check(
+	"keystate=false hides the Remove Key button",
+	els.removeKey.style.display === "none",
+	els.removeKey.style.display
 );
 
 console.log(`\n${passed} passed, ${failed} failed`);

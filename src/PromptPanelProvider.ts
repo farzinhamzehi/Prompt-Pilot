@@ -1,5 +1,6 @@
 import * as vscode from "vscode";
 import { sendToChat } from "./chatHandoff";
+import { clearApiKeyAndSettings } from "./apiKeys";
 import { LlmService, RateLimitError } from "./llm/LlmService";
 import { PresetId, PRESETS, validatePrompt } from "./core/improvementEngine";
 
@@ -13,13 +14,15 @@ type WebviewMsg =
   | { type: "improve"; prompt: string; preset: PresetId; options: ImproveOptions }
   | { type: "send"; prompt: string }
   | { type: "copy"; prompt: string }
-  | { type: "setKey" };
+  | { type: "setKey" }
+  | { type: "removeKey" };
 
 // Messages the extension host posts INTO the webview.
 type HostMsg =
   | { type: "quota"; remaining: number; limit?: number }
   | { type: "result"; improved: string; remaining?: number; limit?: number }
-  | { type: "error"; message: string; rateLimited?: boolean };
+  | { type: "error"; message: string; rateLimited?: boolean }
+  | { type: "keystate"; hasKey: boolean };
 
 // ---------------------------------------------------------------------------
 // Appends deterministic instructions to the improved prompt based on checkboxes
@@ -74,6 +77,11 @@ export class PromptPanelProvider implements vscode.WebviewViewProvider {
           limit: quota.limit,
         });
       }
+    });
+
+    // Advertise whether an own key is configured (drives the Remove Key button)
+    void this.context.secrets.get("promptImprover.apiKey").then((key) => {
+      void view.webview.postMessage({ type: "keystate", hasKey: !!key });
     });
 
     // Deliver a result that arrived while the panel was hidden: with
@@ -149,7 +157,31 @@ export class PromptPanelProvider implements vscode.WebviewViewProvider {
           break;
         case "setKey":
           await vscode.commands.executeCommand("promptImprover.setApiKey");
+          // Reflect the (possibly new) key state in the panel
+          view.webview.postMessage({
+            type: "keystate",
+            hasKey: !!(await this.context.secrets.get("promptImprover.apiKey")),
+          });
           break;
+        case "removeKey": {
+          const CONFIRM = "Remove";
+          const choice = await vscode.window.showWarningMessage(
+            "Prompt Improver: remove your API key?",
+            {
+              modal: true,
+              detail:
+                "The key and your provider settings (provider, model, base URL, cloud-fallback consent) will be cleared. The free proxy tier remains available.",
+            },
+            CONFIRM
+          );
+          if (choice !== CONFIRM) break;
+          await clearApiKeyAndSettings(this.context);
+          view.webview.postMessage({ type: "keystate", hasKey: false });
+          vscode.window.showInformationMessage(
+            "Prompt Improver: API key removed. The free proxy tier is active."
+          );
+          break;
+        }
       }
     });
   }
@@ -377,6 +409,7 @@ export class PromptPanelProvider implements vscode.WebviewViewProvider {
     <button id="send" class="primary">➤ Send to chat</button>
     <button id="copy" class="secondary">Copy</button>
     <button id="setKey" class="secondary" title="Add your own API key for unlimited use">🔑 API Key</button>
+    <button id="removeKey" class="secondary" title="Remove your API key and provider settings" style="display:none">🗑 Remove Key</button>
   </div>
 
   <div id="status"></div>
@@ -479,6 +512,7 @@ export class PromptPanelProvider implements vscode.WebviewViewProvider {
     if (prompt) vscode.postMessage({ type: "copy", prompt });
   };
   $("setKey").onclick = () => vscode.postMessage({ type: "setKey" });
+  $("removeKey").onclick = () => vscode.postMessage({ type: "removeKey" });
 
   // ── Messages from host ─────────────────────────────────────────────────────
   window.addEventListener("message", e => {
@@ -499,6 +533,8 @@ export class PromptPanelProvider implements vscode.WebviewViewProvider {
       }
       setLoading(false);
       save();
+    } else if (msg.type === "keystate") {
+      $("removeKey").style.display = msg.hasKey ? "inline-block" : "none";
     } else if (msg.type === "error") {
       setLoading(false);
       const errDiv = $("error");

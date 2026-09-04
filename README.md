@@ -3,7 +3,11 @@
 > **Improve your AI prompts before you send them.**  
 > Works in VS Code, Cursor, Windsurf, Claude Code — any editor. No setup required.
 
+![CI](https://github.com/farzinhamzehi/Prompt-Pilot/actions/workflows/ci.yml/badge.svg)
+
 ![PromptPilot Interface](public/preview.png)
+
+![PromptPilot with key](public/preview_2.png)
 
 ---
 
@@ -57,7 +61,7 @@ PromptPilot uses a 3-tier LLM strategy — automatic, no configuration needed:
        ↓ not available?
 2. Your own API key (if you added one — unlimited, your cost)
        ↓ no key?
-3. Free hosted proxy → Cloudflare Workers AI / Llama 3.2 (always works, 30 req/day free)
+3. Free hosted proxy → Cloudflare Workers AI / Llama 3.3 70B (always works, 30 req/day free)
 ```
 
 ---
@@ -111,7 +115,7 @@ PromptPilot: Remove API Key
 
 ## Self-hosting the proxy
 
-The free proxy is a Cloudflare Worker that uses Cloudflare Workers AI (`@cf/meta/llama-3.2-3b-instruct`). You can deploy your own copy:
+The free proxy is a Cloudflare Worker that uses Cloudflare Workers AI (`@cf/meta/llama-3.3-70b-instruct-fp8-fast`). You can deploy your own copy:
 
 1. Clone this repo
 2. `cd worker && npm install -g wrangler`
@@ -138,8 +142,21 @@ npm run watch   # watch mode
 ## Privacy
 
 - Your prompts are sent to the improvement backend (either your own key's API, or the free proxy).
+- **No silent cloud fallback**: if your own key/provider fails, you are explicitly asked before anything is sent to the free cloud proxy — and the "always allow" choice is a visible setting (`promptImprover.allowCloudFallback`).
 - The free proxy **does not log prompt content** — only the IP address for rate limiting (reset daily).
 - If privacy is critical, add an Ollama key to keep everything local.
+
+---
+
+## Development
+
+```bash
+npm install
+npm run build   # esbuild bundle → dist/extension.js
+npm test        # all 8 suites, 142 checks — no VS Code needed
+```
+
+The same checks run in CI on every push (`.github/workflows/ci.yml`).
 
 ---
 
@@ -147,6 +164,8 @@ npm run watch   # watch mode
 
 See [CHANGELOG.md](./CHANGELOG.md) for full version history.
 
+- **v0.2.0**: Hardened proxy (server-side prompt, machine+IP+global limits), consent before cloud fallback, safe chat handoff, network timeouts, result stash, dynamic quota badge, Anthropic baseUrl, new sidebar icon, full offline test suite + CI.
+- **v0.1.6**: Persistent per-machine daily quota (no reset on reinstall).
 - **v0.1.2**: Added screenshot preview, custom market & sidebar icons, Cloudflare Workers AI backend.
 - **v0.1.1**: Added custom activity bar icon & license.
 - **v0.1.0**: Initial release with 4 presets & 3-tier LLM engine.

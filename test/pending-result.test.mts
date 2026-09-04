@@ -7,7 +7,12 @@
 import * as vscode from "vscode";
 import { PromptPanelProvider } from "../src/PromptPanelProvider";
 
-const state = (vscode as any).__state as { lmModels: unknown[] };
+const state = (vscode as any).__state as {
+	lmModels: unknown[];
+	config: Map<string, unknown>;
+	warningResponses: (string | undefined)[];
+	warningCalls: { message: string; options?: { modal?: boolean; detail?: string }; items: string[] }[];
+};
 
 let passed = 0;
 let failed = 0;
@@ -21,7 +26,11 @@ function check(name: string, cond: boolean, extra?: unknown) {
 	}
 }
 
-function makeContext() {
+function makeContext(secrets?: {
+	get: () => Promise<string | undefined>;
+	store: () => Promise<void>;
+	delete: () => Promise<void>;
+}) {
 	const store = new Map<string, unknown>();
 	const memento = {
 		get: (key: string) => store.get(key),
@@ -34,7 +43,11 @@ function makeContext() {
 		store,
 		ctx: {
 			subscriptions: [],
-			secrets: { get: async () => undefined, store: async () => {}, delete: async () => {} },
+			secrets: secrets ?? {
+				get: async () => undefined,
+				store: async () => {},
+				delete: async () => {},
+			},
 			workspaceState: memento,
 			globalState: memento,
 		},
@@ -116,6 +129,42 @@ async function main() {
 	// 3. Quota sync forwards the dynamic limit to the webview (B3)
 	const quotaMsg = v2.messages.find((m: any) => m?.type === "quota") as any;
 	check("quota sync forwards the limit", quotaMsg?.limit === 30, v2.messages);
+
+	// 4. Panel Remove Key flow: confirm → key + settings cleared → UI updated
+	{
+		state.config.set("promptImprover.userProvider", "openai");
+		state.config.set("promptImprover.allowCloudFallback", true);
+		state.warningResponses = ["Remove"];
+		let currentKey: string | undefined = "sk-live";
+		const deleted: string[] = [];
+		const c2 = makeContext({
+			get: async () => currentKey,
+			store: async () => {},
+			delete: async () => {
+				deleted.push("promptImprover.apiKey");
+				currentKey = undefined;
+			},
+		});
+		const p2 = new PromptPanelProvider(c2.ctx as any);
+		const v3 = makeView(async () => true);
+		p2.resolveWebviewView(v3.view as any);
+		await new Promise((r) => setTimeout(r, 10));
+		const ks1 = v3.messages.find((m: any) => m?.type === "keystate") as any;
+		check("keystate advertised on resolve when a key exists", ks1?.hasKey === true, v3.messages);
+		await v3.fire({ type: "removeKey" });
+		const lastWarn = state.warningCalls[state.warningCalls.length - 1];
+		check("removeKey asks for confirmation (modal)", lastWarn?.options?.modal === true, lastWarn?.options);
+		check("removeKey deletes the stored key", deleted.length === 1 && currentKey === undefined, deleted);
+		check(
+			"removeKey clears provider + consent settings",
+			state.config.get("promptImprover.userProvider") === undefined &&
+				state.config.get("promptImprover.allowCloudFallback") === undefined,
+			[...state.config.keys()]
+		);
+		const ksList = v3.messages.filter((m: any) => m?.type === "keystate") as any[];
+		check("panel updated to key-less state", ksList[ksList.length - 1]?.hasKey === false, v3.messages);
+		state.warningResponses = [];
+	}
 
 	console.log(`\n${passed} passed, ${failed} failed`);
 	if (failed > 0) process.exit(1);
