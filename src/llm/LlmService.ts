@@ -18,6 +18,40 @@ interface AnthropicResponse {
   content: { type: string; text: string }[];
 }
 
+/** Thrown when the hosted proxy reports the daily free-tier limit (HTTP 429).
+ *  This typed error — not message text — is the structured contract the UI
+ *  uses to decide whether to show the "Add your own key" link. */
+export class RateLimitError extends Error {
+  constructor(
+    message: string,
+    public readonly remaining = 0
+  ) {
+    super(message);
+    this.name = "RateLimitError";
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Timeouts — no network call may hang the UI forever. Mutable so tests can
+// shrink the budgets.
+// ---------------------------------------------------------------------------
+export const TIMEOUTS = {
+  llmMs: 90_000,
+  quotaMs: 10_000,
+};
+
+/** Thrown when a network call exceeds its time budget. */
+export class HttpTimeoutError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "HttpTimeoutError";
+  }
+}
+
+function isTimeoutError(err: unknown): boolean {
+  return err instanceof Error && err.name === "TimeoutError";
+}
+
 // ---------------------------------------------------------------------------
 // LlmService
 // ---------------------------------------------------------------------------
@@ -112,6 +146,26 @@ export class LlmService {
     return choice === USE_ONCE;
   }
 
+  // ── Network timeout wrapper ───────────────────────────────────────────────
+
+  /**
+   * fetch with a hard time budget — a hung connection must never leave the
+   * Improve button spinning forever.
+   */
+  private async fetchWithTimeout(
+    url: string,
+    init: RequestInit,
+    timeoutMs: number,
+    timeoutMessage: string
+  ): Promise<Response> {
+    try {
+      return await fetch(url, { ...init, signal: AbortSignal.timeout(timeoutMs) });
+    } catch (err) {
+      if (isTimeoutError(err)) throw new HttpTimeoutError(timeoutMessage);
+      throw err;
+    }
+  }
+
   // ── Tier 1 ────────────────────────────────────────────────────────────────
 
   private async tryVscodeLm(userMsg: string): Promise<string | null> {
@@ -133,14 +187,28 @@ export class LlmService {
     ];
 
     const tokenSource = new vscode.CancellationTokenSource();
-    const response = await model.sendRequest(messages, {}, tokenSource.token);
+    // Bound the wait: cancel the request if the model stalls, and always
+    // dispose the token source (the original code leaked it).
+    let timedOut = false;
+    const watchdog = setTimeout(() => {
+      timedOut = true;
+      tokenSource.cancel();
+    }, TIMEOUTS.llmMs);
+    try {
+      const response = await model.sendRequest(messages, {}, tokenSource.token);
 
-    let text = "";
-    for await (const chunk of response.text) {
-      text += chunk;
+      let text = "";
+      for await (const chunk of response.text) {
+        text += chunk;
+      }
+
+      // A cancelled stream can end early with partial text — never use it.
+      if (timedOut) return null;
+      return text.trim() || null;
+    } finally {
+      clearTimeout(watchdog);
+      tokenSource.dispose();
     }
-
-    return text.trim() || null;
   }
 
   // ── Tier 2 ────────────────────────────────────────────────────────────────
@@ -172,14 +240,19 @@ export class LlmService {
       { role: "user", content: userMsg },
     ];
 
-    const res = await fetch(`${baseUrl}/chat/completions`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${apiKey}`,
+    const res = await this.fetchWithTimeout(
+      `${baseUrl}/chat/completions`,
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${apiKey}`,
+        },
+        body: JSON.stringify({ model, messages, temperature: 0.4, max_tokens: 2048 }),
       },
-      body: JSON.stringify({ model, messages, temperature: 0.4, max_tokens: 2048 }),
-    });
+      TIMEOUTS.llmMs,
+      "The provider API took too long to respond. Please try again."
+    );
 
     if (!res.ok) {
       const text = await res.text();
@@ -197,20 +270,25 @@ export class LlmService {
     model: string,
     userMsg: string
   ): Promise<string> {
-    const res = await fetch("https://api.anthropic.com/v1/messages", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "x-api-key": apiKey,
-        "anthropic-version": "2023-06-01",
+    const res = await this.fetchWithTimeout(
+      "https://api.anthropic.com/v1/messages",
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "x-api-key": apiKey,
+          "anthropic-version": "2023-06-01",
+        },
+        body: JSON.stringify({
+          model,
+          max_tokens: 2048,
+          system: SYSTEM_PROMPT,
+          messages: [{ role: "user", content: userMsg }],
+        }),
       },
-      body: JSON.stringify({
-        model,
-        max_tokens: 2048,
-        system: SYSTEM_PROMPT,
-        messages: [{ role: "user", content: userMsg }],
-      }),
-    });
+      TIMEOUTS.llmMs,
+      "The Anthropic API took too long to respond. Please try again."
+    );
 
     if (!res.ok) {
       const text = await res.text();
@@ -233,12 +311,17 @@ export class LlmService {
       "https://promptpilot-proxy.5farzinhamzei.workers.dev/improve";
 
     try {
-      const res = await fetch(proxyUrl, {
-        method: "GET",
-        headers: {
-          "X-Machine-ID": vscode.env.machineId,
+      const res = await this.fetchWithTimeout(
+        proxyUrl,
+        {
+          method: "GET",
+          headers: {
+            "X-Machine-ID": vscode.env.machineId,
+          },
         },
-      });
+        TIMEOUTS.quotaMs,
+        "The quota check took too long."
+      );
 
       if (!res.ok) return null;
       const data = (await res.json()) as { remaining?: number };
@@ -258,23 +341,36 @@ export class LlmService {
 
     let res: Response;
     try {
-      res = await fetch(proxyUrl, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "X-Machine-ID": vscode.env.machineId,
+      res = await this.fetchWithTimeout(
+        proxyUrl,
+        {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "X-Machine-ID": vscode.env.machineId,
+          },
+          body: JSON.stringify({ systemPrompt: SYSTEM_PROMPT, userMessage: userMsg }),
         },
-        body: JSON.stringify({ systemPrompt: SYSTEM_PROMPT, userMessage: userMsg }),
-      });
-    } catch {
+        TIMEOUTS.llmMs,
+        "The improvement service took too long to respond. Please try again."
+      );
+    } catch (err) {
+      if (err instanceof HttpTimeoutError) throw err; // already a friendly message
       throw new Error(
         "Cannot reach the improvement service. Check your internet connection."
       );
     }
 
     if (res.status === 429) {
-      const data = (await res.json()) as { error: string };
-      throw new Error(data.error);
+      const data = (await res.json()) as {
+        error?: string;
+        code?: string;
+        remaining?: number;
+      };
+      throw new RateLimitError(
+        data.error ?? "Free tier limit reached. Add your own API key for unlimited use.",
+        typeof data.remaining === "number" ? data.remaining : 0
+      );
     }
 
     if (!res.ok) {

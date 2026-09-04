@@ -83,6 +83,8 @@ export const __state = {
 	executedCommands: [] as { id: string; args: unknown[] }[],
 	availableCommands: [] as string[],
 	failingCommands: new Set<string>(),
+	tokenSourcesCreated: 0,
+	tokenSourcesDisposed: 0,
 	lmModels: [] as unknown[],
 	lmCalls: 0,
 };
@@ -159,8 +161,15 @@ export const env = {
 
 export class CancellationTokenSource {
 	token = { isCancellationRequested: false };
-	cancel(): void {}
-	dispose(): void {}
+	constructor() {
+		__state.tokenSourcesCreated++;
+	}
+	cancel(): void {
+		this.token.isCancellationRequested = true;
+	}
+	dispose(): void {
+		__state.tokenSourcesDisposed++;
+	}
 }
 
 // `lm` mirrors VS Code >= 1.90. LlmService probes availability and falls back

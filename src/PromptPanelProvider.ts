@@ -1,6 +1,6 @@
 import * as vscode from "vscode";
 import { sendToChat } from "./chatHandoff";
-import { LlmService } from "./llm/LlmService";
+import { LlmService, RateLimitError } from "./llm/LlmService";
 import { PresetId, PRESETS, validatePrompt } from "./core/improvementEngine";
 
 interface ImproveOptions {
@@ -14,6 +14,12 @@ type WebviewMsg =
   | { type: "send"; prompt: string }
   | { type: "copy"; prompt: string }
   | { type: "setKey" };
+
+// Messages the extension host posts INTO the webview.
+type HostMsg =
+  | { type: "quota"; remaining: number }
+  | { type: "result"; improved: string; remaining?: number }
+  | { type: "error"; message: string; rateLimited?: boolean };
 
 // ---------------------------------------------------------------------------
 // Appends deterministic instructions to the improved prompt based on checkboxes
@@ -87,10 +93,13 @@ export class PromptPanelProvider implements vscode.WebviewViewProvider {
               remaining: result.remaining,
             });
           } catch (err) {
-            view.webview.postMessage({
+            const hostMsg: HostMsg = {
               type: "error",
               message: err instanceof Error ? err.message : String(err),
-            });
+              // Structured flag — the webview keys off this, never message text.
+              rateLimited: err instanceof RateLimitError,
+            };
+            view.webview.postMessage(hostMsg);
           }
           break;
         }
@@ -452,7 +461,8 @@ export class PromptPanelProvider implements vscode.WebviewViewProvider {
     } else if (msg.type === "error") {
       setLoading(false);
       const errDiv = $("error");
-      if (msg.message && msg.message.includes("limit reached")) {
+      // Structured flag from the host — never string matching on the message.
+      if (msg.rateLimited === true) {
         errDiv.textContent = msg.message + " ";
         const link = document.createElement("a");
         link.textContent = "Add your own key →";

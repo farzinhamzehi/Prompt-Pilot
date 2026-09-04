@@ -154,7 +154,7 @@ const LIMIT_MSG =
 	"Free tier limit reached (30 requests/day). Add your own API key in Prompt Improver settings for unlimited use.";
 
 // Scenario 1: rate-limit error → server text via textContent + DOM-built link
-messageHandler!({ data: { type: "error", message: LIMIT_MSG } });
+messageHandler!({ data: { type: "error", message: LIMIT_MSG, rateLimited: true } });
 
 check("error box becomes visible", errDiv.style.display === "block");
 check("server message rendered via textContent (injection-safe)", errDiv.textContent.includes("limit reached"));
@@ -188,6 +188,15 @@ messageHandler!({ data: { type: "error", message: "Proxy error 500. Please try a
 check(
 	"non-limit error renders as plain text with no link",
 	errDiv.textContent === "Proxy error 500. Please try again." && errDiv.children.length === 0
+);
+
+// Scenario 3b: the structured flag — not the message text — controls the link.
+// The same legacy phrase WITHOUT the flag must render as plain text only.
+errDiv.children.length = 0;
+messageHandler!({ data: { type: "error", message: LIMIT_MSG } }); // no rateLimited flag
+check(
+	"legacy phrase without the structured flag gets no link",
+	errDiv.textContent.includes("limit reached") && errDiv.children.length === 0
 );
 
 // Scenario 4: hostile server text cannot inject markup through this path

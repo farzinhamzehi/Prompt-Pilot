@@ -3,12 +3,14 @@
 //   npx tsx --tsconfig test/tsconfig.json test/llm-service.test.mts
 
 import * as vscode from "vscode";
-import { LlmService } from "../src/llm/LlmService";
+import { LlmService, RateLimitError, TIMEOUTS } from "../src/llm/LlmService";
 
 const state = (vscode as any).__state as {
 	config: Map<string, unknown>;
 	warningResponses: (string | undefined)[];
 	warningCalls: { message: string; options?: { modal?: boolean; detail?: string }; items: string[] }[];
+	tokenSourcesCreated: number;
+	tokenSourcesDisposed: number;
 	lmModels: unknown[];
 	lmCalls: number;
 };
@@ -46,11 +48,23 @@ function jsonResponse(data: unknown, status = 200) {
 	};
 }
 
-function installFetch(behavior: "all-ok" | "key-fails" | "ollama-down") {
+function installFetch(behavior: "all-ok" | "key-fails" | "ollama-down" | "proxy-limited") {
 	fetchCalls = [];
 	(globalThis as any).fetch = async (url: unknown, opts: unknown) => {
 		const u = String(url);
 		fetchCalls.push({ url: u, opts });
+		if (behavior === "proxy-limited" && u.includes("workers.dev")) {
+			return jsonResponse(
+				{
+					error:
+						"Free tier limit reached (30 requests/day). Add your own API key in Prompt Improver settings for unlimited use.",
+					code: "RATE_LIMITED",
+					remaining: 0,
+					limit: 30,
+				},
+				429
+			);
+		}
 		if (u.includes("workers.dev")) {
 			return jsonResponse({ improved: "PROXY-RESULT", remaining: 29, limit: 30 });
 		}
@@ -64,12 +78,36 @@ function installFetch(behavior: "all-ok" | "key-fails" | "ollama-down") {
 	};
 }
 
+// A fetch that never answers on its own — only the caller's AbortSignal can
+// end it. Simulates a hung network/provider.
+function installHangingFetch() {
+	fetchCalls = [];
+	(globalThis as any).fetch = (url: unknown, opts: any) =>
+		new Promise((_resolve, reject) => {
+			const u = String(url);
+			fetchCalls.push({ url: u, opts });
+			// AbortSignal.timeout() uses an unref'd timer in Node, which by itself
+			// will not keep a short-lived test process alive — the process would
+			// exit mid-await before the abort fires. A referenced interval keeps
+			// the loop alive until the abort lands, then is cleared.
+			const keepAlive = setInterval(() => {}, 10);
+			opts?.signal?.addEventListener?.("abort", () => {
+				clearInterval(keepAlive);
+				const err = new Error("The operation timed out.");
+				err.name = "TimeoutError";
+				reject(err);
+			});
+		});
+}
+
 function resetState() {
 	state.config.clear();
 	state.warningResponses = [];
 	state.warningCalls = [];
 	state.lmModels = [];
 	state.lmCalls = 0;
+	state.tokenSourcesCreated = 0;
+	state.tokenSourcesDisposed = 0;
 	currentKey = undefined;
 	installFetch("all-ok");
 }
@@ -222,6 +260,129 @@ async function main() {
 	{
 		const r = await svc().improve("draft", "shorter");
 		check("ollama down + consent -> proxy used", r.improved === "PROXY-RESULT", r);
+	}
+
+	// 11. Proxy 429 -> typed RateLimitError carrying the server message
+	resetState();
+	installFetch("proxy-limited");
+	{
+		let err: unknown = null;
+		try {
+			await svc().improve("draft", "structured");
+		} catch (e) {
+			err = e;
+		}
+		check("proxy 429 -> RateLimitError instance", err instanceof RateLimitError, String(err));
+		check("RateLimitError preserves the server message", /limit reached/.test(String(err)), String(err));
+		check("RateLimitError carries its own name", (err as Error | null)?.name === "RateLimitError", (err as Error | null)?.name);
+	}
+
+	// 12. Provider call hangs -> bounded wait, consent dialog mentions timeout,
+	//     and on decline the proxy is never touched
+	resetState();
+	currentKey = "sk-slow";
+	state.config.set("promptImprover.userProvider", "openai");
+	installHangingFetch();
+	const savedLlmMs = TIMEOUTS.llmMs;
+	TIMEOUTS.llmMs = 60;
+	state.warningResponses = [undefined];
+	try {
+		const started = Date.now();
+		let err: unknown = null;
+		try {
+			await svc().improve("draft", "specific");
+		} catch (e) {
+			err = e;
+		}
+		const elapsed = Date.now() - started;
+		check("hanging provider -> rejects within the budget (no forever spinner)", elapsed < 2000, elapsed);
+		check("hanging provider -> consent dialog shown", state.warningCalls.length === 1, state.warningCalls.length);
+		check("dialog detail mentions the timeout", /took too long/i.test(state.warningCalls[0]?.options?.detail ?? ""), state.warningCalls[0]?.options?.detail);
+		check("declined after timeout -> proxy NEVER called", !proxyCalled(), fetchCalls);
+		check("declined after timeout -> throws", err instanceof Error);
+	} finally {
+		TIMEOUTS.llmMs = savedLlmMs;
+	}
+
+	// 13. getQuota with a hanging network -> returns null within the quota budget
+	resetState();
+	installHangingFetch();
+	const savedQuotaMs = TIMEOUTS.quotaMs;
+	TIMEOUTS.quotaMs = 60;
+	try {
+		const started = Date.now();
+		const remaining = await svc().getQuota();
+		const elapsed = Date.now() - started;
+		check("getQuota timeout -> returns null", remaining === null, remaining);
+		check("getQuota timeout -> bounded wait", elapsed < 2000, elapsed);
+	} finally {
+		TIMEOUTS.quotaMs = savedQuotaMs;
+	}
+
+	// 14. Tier-1 (vscode.lm) hangs -> watchdog cancels the request and we fall
+	//     through to the proxy instead of spinning forever
+	resetState();
+	installFetch("all-ok");
+	state.lmModels = [
+		{
+			sendRequest: (_m: unknown, _o: unknown, token: { isCancellationRequested: boolean }) =>
+				new Promise((_res, rej) => {
+					const t = setInterval(() => {
+						if (token.isCancellationRequested) {
+							clearInterval(t);
+							rej(new Error("cancelled by watchdog"));
+						}
+					}, 5);
+				}),
+		},
+	];
+	const savedLlmMs2 = TIMEOUTS.llmMs;
+	TIMEOUTS.llmMs = 60;
+	try {
+		const started = Date.now();
+		const r = await svc().improve("draft", "shorter");
+		const elapsed = Date.now() - started;
+		check("hanging Tier-1 -> falls through to proxy", r.improved === "PROXY-RESULT", r);
+		check("hanging Tier-1 -> bounded wait", elapsed < 2000, elapsed);
+	} finally {
+		TIMEOUTS.llmMs = savedLlmMs2;
+	}
+
+	// 15. Tier-1 success disposes its CancellationTokenSource (leak fix)
+	resetState();
+	state.lmModels = [streamingModel("TIER1-RESULT")];
+	{
+		await svc().improve("draft", "specific");
+		check("Tier-1 token source created", state.tokenSourcesCreated === 1, state.tokenSourcesCreated);
+		check("Tier-1 token source disposed (no leak)", state.tokenSourcesDisposed === state.tokenSourcesCreated, state.tokenSourcesDisposed);
+	}
+
+	// 16. Tier-1 stream that ends early after cancellation -> partial text is
+	//     discarded and we fall through instead of returning a truncated prompt
+	resetState();
+	installFetch("all-ok");
+	state.lmModels = [
+		{
+			sendRequest: (_m: unknown, _o: unknown, token: { isCancellationRequested: boolean }) => ({
+				text: (async function* () {
+					yield "PARTIAL-";
+					while (!token.isCancellationRequested) {
+						await new Promise((r) => setTimeout(r, 5));
+					}
+					// cancellation ends the stream WITHOUT throwing
+					return;
+				})(),
+			}),
+		},
+	];
+	const savedLlmMs3 = TIMEOUTS.llmMs;
+	TIMEOUTS.llmMs = 60;
+	try {
+		const r = await svc().improve("draft", "shorter");
+		check("cancelled partial stream -> falls through to proxy", r.improved === "PROXY-RESULT", r);
+		check("cancelled partial stream -> partial text never returned", r.improved !== "PARTIAL-", r);
+	} finally {
+		TIMEOUTS.llmMs = savedLlmMs3;
 	}
 
 	console.log(`\n${passed} passed, ${failed} failed`);
