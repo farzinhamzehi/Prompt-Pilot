@@ -17,8 +17,8 @@ type WebviewMsg =
 
 // Messages the extension host posts INTO the webview.
 type HostMsg =
-  | { type: "quota"; remaining: number }
-  | { type: "result"; improved: string; remaining?: number }
+  | { type: "quota"; remaining: number; limit?: number }
+  | { type: "result"; improved: string; remaining?: number; limit?: number }
   | { type: "error"; message: string; rateLimited?: boolean };
 
 // ---------------------------------------------------------------------------
@@ -66,11 +66,37 @@ export class PromptPanelProvider implements vscode.WebviewViewProvider {
     view.webview.html = this.html(view.webview);
 
     // Fetch current remaining quota for this machine ID asynchronously and sync UI
-    void this.llm.getQuota().then((remaining) => {
-      if (typeof remaining === "number") {
-        void view.webview.postMessage({ type: "quota", remaining });
+    void this.llm.getQuota().then((quota) => {
+      if (quota) {
+        void view.webview.postMessage({
+          type: "quota",
+          remaining: quota.remaining,
+          limit: quota.limit,
+        });
       }
     });
+
+    // Deliver a result that arrived while the panel was hidden: with
+    // retainContextWhenHidden:false the webview is destroyed on hide and its
+    // postMessage would have been dropped — the quota-paid result is stashed
+    // instead (see the improve handler below).
+    const pending = this.context.workspaceState.get("promptImprover.pendingResult") as
+      | { improved: string; remaining?: number; limit?: number }
+      | undefined;
+    if (pending) {
+      void view.webview
+        .postMessage({
+          type: "result",
+          improved: pending.improved,
+          remaining: pending.remaining,
+          limit: pending.limit,
+        })
+        .then((delivered) => {
+          if (delivered) {
+            void this.context.workspaceState.update("promptImprover.pendingResult", undefined);
+          }
+        });
+    }
 
     view.webview.onDidReceiveMessage(async (msg: WebviewMsg) => {
       switch (msg.type) {
@@ -87,11 +113,22 @@ export class PromptPanelProvider implements vscode.WebviewViewProvider {
           try {
             const result = await this.llm.improve(msg.prompt, msg.preset);
             const improved = applyOptions(result.improved, msg.options);
-            view.webview.postMessage({
+            const delivered = await view.webview.postMessage({
               type: "result",
               improved,
               remaining: result.remaining,
+              limit: result.limit,
             });
+            if (!delivered) {
+              // Panel hidden mid-request → webview destroyed, message dropped.
+              // Stash the (quota-paid) result for the next resolve instead of
+              // losing it.
+              await this.context.workspaceState.update("promptImprover.pendingResult", {
+                improved,
+                remaining: result.remaining,
+                limit: result.limit,
+              });
+            }
           } catch (err) {
             const hostMsg: HostMsg = {
               type: "error",
@@ -343,7 +380,7 @@ export class PromptPanelProvider implements vscode.WebviewViewProvider {
   </div>
 
   <div id="status"></div>
-  <div id="quota">⚡ 30/30 remaining prompts</div>
+  <div id="quota">⚡ …</div>
   <div id="error"></div>
 
 <script nonce="${nonce}">
@@ -446,15 +483,19 @@ export class PromptPanelProvider implements vscode.WebviewViewProvider {
   // ── Messages from host ─────────────────────────────────────────────────────
   window.addEventListener("message", e => {
     const msg = e.data;
+    // Dynamic label: use the server-provided limit when present, else no total.
+    const quotaLabel = (remaining, limit) =>
+      "⚡ " + remaining + (typeof limit === "number" ? "/" + limit : "") + " remaining prompts";
+
     if (msg.type === "quota") {
       if (typeof msg.remaining === "number") {
-        $("quota").textContent = "⚡ " + msg.remaining + "/30 remaining prompts";
+        $("quota").textContent = quotaLabel(msg.remaining, msg.limit);
         save();
       }
     } else if (msg.type === "result") {
       $("output").value = msg.improved;
       if (typeof msg.remaining === "number") {
-        $("quota").textContent = "⚡ " + msg.remaining + "/30 remaining prompts";
+        $("quota").textContent = quotaLabel(msg.remaining, msg.limit);
       }
       setLoading(false);
       save();

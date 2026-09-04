@@ -83,6 +83,7 @@ export const __state = {
 	executedCommands: [] as { id: string; args: unknown[] }[],
 	availableCommands: [] as string[],
 	failingCommands: new Set<string>(),
+	registeredCommands: new Map<string, (...args: unknown[]) => unknown>(),
 	tokenSourcesCreated: 0,
 	tokenSourcesDisposed: 0,
 	lmModels: [] as unknown[],
@@ -133,7 +134,8 @@ export const window = {
 };
 
 export const commands = {
-	registerCommand(_id: string, _handler: (...args: unknown[]) => unknown): Disposable {
+	registerCommand(id: string, handler: (...args: unknown[]) => unknown): Disposable {
+		__state.registeredCommands.set(id, handler);
 		return { dispose() {} };
 	},
 	executeCommand: async <T = unknown>(id: string, ...args: unknown[]): Promise<T | undefined> => {

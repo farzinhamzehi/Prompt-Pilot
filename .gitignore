@@ -39,3 +39,6 @@ AGENT_GUIDE.md
 prompt_improvement_guide.md
 
 npm-debug.log*
+
+# Packaged extension artifacts (never commit built .vsix files)
+*.vsix

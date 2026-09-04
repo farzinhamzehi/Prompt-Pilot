@@ -135,6 +135,7 @@ async function main() {
 		const r = await svc().improve("make a login form", "specific");
 		check("free user falls through to proxy", r.improved === "PROXY-RESULT", r);
 		check("free user: no consent dialog shown", state.warningCalls.length === 0);
+		check("free user: proxy result carries the limit field", r.limit === 30, r);
 	}
 
 	// 2. Free user WITH Copilot -> Tier 1 wins, network never touched
@@ -383,6 +384,33 @@ async function main() {
 		check("cancelled partial stream -> partial text never returned", r.improved !== "PARTIAL-", r);
 	} finally {
 		TIMEOUTS.llmMs = savedLlmMs3;
+	}
+
+	// 17. getQuota returns the { remaining, limit } shape from the proxy
+	resetState();
+	{
+		const q = await svc().getQuota();
+		check("getQuota returns remaining from the server", q?.remaining === 29, q);
+		check("getQuota returns the dynamic limit", q?.limit === 30, q);
+	}
+
+	// 18. Anthropic honors userBaseUrl (custom gateway) and x-api-key auth
+	resetState();
+	currentKey = "sk-ant";
+	state.config.set("promptImprover.userProvider", "anthropic");
+	state.config.set("promptImprover.userBaseUrl", "https://gateway.example.com/anthropic");
+	{
+		let seenUrl = "";
+		let seenHeaders: Record<string, string> = {};
+		(globalThis as any).fetch = async (url: unknown, opts: any) => {
+			seenUrl = String(url);
+			seenHeaders = opts?.headers ?? {};
+			return jsonResponse({ content: [{ type: "text", text: "ANTHROPIC-RESULT" }] });
+		};
+		const r = await svc().improve("draft", "structured");
+		check("anthropic result returned", r.improved === "ANTHROPIC-RESULT", r);
+		check("anthropic uses the custom baseUrl", seenUrl === "https://gateway.example.com/anthropic/v1/messages", seenUrl);
+		check("anthropic sends x-api-key (not Bearer)", seenHeaders["x-api-key"] === "sk-ant" && !seenHeaders.Authorization, seenHeaders);
 	}
 
 	console.log(`\n${passed} passed, ${failed} failed`);

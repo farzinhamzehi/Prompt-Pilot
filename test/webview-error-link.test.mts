@@ -110,12 +110,16 @@ const vscodeApiMock = {
 	throw new Error("offline in test");
 };
 
+const memento = { get: () => undefined, update: async () => {} };
 const ctx = {
 	secrets: {
 		get: async () => undefined,
 		store: async () => {},
 		delete: async () => {},
 	},
+	// resolveWebviewView now reads the pending-result stash from workspaceState.
+	workspaceState: memento,
+	globalState: memento,
 };
 const provider = new PromptPanelProvider(ctx as any);
 
@@ -207,6 +211,22 @@ check(
 	"hostile markup is stored as inert text, never as HTML",
 	errDiv.innerHTML === "" && errDiv.textContent.includes("<img"),
 	errDiv.innerHTML
+);
+
+// Scenario 5: dynamic quota label — uses the server-provided limit when present
+messageHandler!({ data: { type: "quota", remaining: 5, limit: 12 } });
+check(
+	"quota message with limit renders 'N/M'",
+	els.quota.textContent === "⚡ 5/12 remaining prompts",
+	els.quota.textContent
+);
+
+// Scenario 6: quota without a limit (older server) renders without a total
+messageHandler!({ data: { type: "quota", remaining: 5 } });
+check(
+	"quota message without limit renders 'N' only",
+	els.quota.textContent === "⚡ 5 remaining prompts",
+	els.quota.textContent
 );
 
 console.log(`\n${passed} passed, ${failed} failed`);

@@ -59,6 +59,8 @@ function isTimeoutError(err: unknown): boolean {
 export interface ImproveResult {
   improved: string;
   remaining?: number;
+  /** Daily limit reported by the proxy (drives the dynamic "N/M" badge). */
+  limit?: number;
 }
 
 export class LlmService {
@@ -222,7 +224,7 @@ export class LlmService {
       this.defaultBaseUrl(provider);
 
     if (provider === "anthropic") {
-      return this.callAnthropic(apiKey, model, userMsg);
+      return this.callAnthropic(baseUrl, apiKey, model, userMsg);
     }
 
     // OpenAI-compatible (openai / groq / ollama / custom)
@@ -266,12 +268,13 @@ export class LlmService {
   }
 
   private async callAnthropic(
+    baseUrl: string,
     apiKey: string,
     model: string,
     userMsg: string
   ): Promise<string> {
     const res = await this.fetchWithTimeout(
-      "https://api.anthropic.com/v1/messages",
+      `${baseUrl}/v1/messages`,
       {
         method: "POST",
         headers: {
@@ -304,7 +307,7 @@ export class LlmService {
   /**
    * Fetches remaining daily quota from the proxy server without consuming a prompt count.
    */
-  async getQuota(): Promise<number | null> {
+  async getQuota(): Promise<{ remaining: number; limit?: number } | null> {
     const cfg = vscode.workspace.getConfiguration("promptImprover");
     const proxyUrl =
       cfg.get<string>("proxyUrl") ||
@@ -324,8 +327,12 @@ export class LlmService {
       );
 
       if (!res.ok) return null;
-      const data = (await res.json()) as { remaining?: number };
-      return typeof data.remaining === "number" ? data.remaining : null;
+      const data = (await res.json()) as { remaining?: number; limit?: number };
+      if (typeof data.remaining !== "number") return null;
+      return {
+        remaining: data.remaining,
+        limit: typeof data.limit === "number" ? data.limit : undefined,
+      };
     } catch {
       return null;
     }
@@ -377,8 +384,12 @@ export class LlmService {
       throw new Error(`Proxy error ${res.status}. Please try again.`);
     }
 
-    const data = (await res.json()) as { improved: string; remaining: number };
-    return { improved: data.improved, remaining: data.remaining };
+    const data = (await res.json()) as {
+      improved: string;
+      remaining: number;
+      limit?: number;
+    };
+    return { improved: data.improved, remaining: data.remaining, limit: data.limit };
   }
 
   // ── Helpers ───────────────────────────────────────────────────────────────
@@ -397,6 +408,7 @@ export class LlmService {
     const urls: Record<string, string> = {
       openai: "https://api.openai.com/v1",
       groq: "https://api.groq.com/openai/v1",
+      anthropic: "https://api.anthropic.com",
       ollama: "http://localhost:11434/v1",
     };
     return urls[provider] ?? "https://api.openai.com/v1";

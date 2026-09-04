@@ -11,10 +11,6 @@ export function activate(context: vscode.ExtensionContext) {
       { webviewOptions: { retainContextWhenHidden: false } }
     ),
 
-    vscode.commands.registerCommand("promptImprover.focus", () =>
-      vscode.commands.executeCommand("promptImprover.panel.focus")
-    ),
-
     // ── Set API Key command ──────────────────────────────────────────────────
     vscode.commands.registerCommand(
       "promptImprover.setApiKey",
@@ -84,8 +80,15 @@ export function activate(context: vscode.ExtensionContext) {
     // ── Remove API Key command ───────────────────────────────────────────────
     vscode.commands.registerCommand("promptImprover.removeApiKey", async () => {
       await context.secrets.delete("promptImprover.apiKey");
+      // Also clear provider prefs + stored cloud-fallback consent so no stale
+      // config silently steers future requests after the key is gone.
+      const cfg = vscode.workspace.getConfiguration("promptImprover");
+      await cfg.update("userProvider", undefined, vscode.ConfigurationTarget.Global);
+      await cfg.update("userModel", undefined, vscode.ConfigurationTarget.Global);
+      await cfg.update("userBaseUrl", undefined, vscode.ConfigurationTarget.Global);
+      await cfg.update("allowCloudFallback", undefined, vscode.ConfigurationTarget.Global);
       vscode.window.showInformationMessage(
-        "API key removed. Prompt Improver will use the free proxy."
+        "API key and provider settings removed. Prompt Improver will use the free proxy."
       );
     })
   );
