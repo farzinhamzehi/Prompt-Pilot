@@ -252,6 +252,13 @@ async function main() {
 		check("oversized body consumes no quota", kv.store.size === 0);
 	}
 
+	// 33. System prompt guards location markers (A/B finding: never drop L4-21)
+	{
+		const sp = (mod as any).SYSTEM_PROMPT as string;
+		check("system prompt is exported for guarding", typeof sp === "string" && sp.length > 100);
+		check("system prompt preserves location markers verbatim (e.g. L4-21)", /L4-21/.test(sp) && /verbatim/.test(sp), sp?.slice(0, 80));
+	}
+
 	console.log(`\n${passed} passed, ${failed} failed`);
 	if (failed > 0) process.exit(1);
 }

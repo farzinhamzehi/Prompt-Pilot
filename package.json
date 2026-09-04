@@ -2,7 +2,7 @@
   "name": "promptpilot",
   "displayName": "PromptPilot",
   "description": "Improve your AI agent prompts instantly — works in VS Code, Cursor, Windsurf, and any editor. Zero setup required.",
-  "version": "0.1.6",
+  "version": "0.2.0",
   "publisher": "farzinhamzehi",
   "icon": "public/market.jpg",
   "license": "MIT",
@@ -128,6 +128,7 @@
     "@types/node": "^20.x",
     "@vscode/vsce": "^3.0.0",
     "esbuild": "^0.21.0",
-    "typescript": "^5.4.0"
+    "typescript": "^5.4.0",
+    "tsx": "^4.19.0"
   }
 }

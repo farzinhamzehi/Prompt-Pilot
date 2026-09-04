@@ -1,0 +1,35 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install extension dependencies
+        run: npm install
+
+      - name: Install worker dependencies
+        run: npm --prefix worker install
+
+      - name: Type-check extension (tsc)
+        run: npx tsc --noEmit
+
+      - name: Type-check worker (tsc)
+        working-directory: worker
+        run: npx tsc --noEmit
+
+      - name: Build extension bundle (esbuild)
+        run: npm run build
+
+      - name: Run all test suites
+        run: npm test

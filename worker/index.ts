@@ -34,7 +34,7 @@ const COUNTER_TTL_SECONDS = 90000; // ~25h: covers one UTC day + margin
 // Optional override without a code change: [vars] SYSTEM_PROMPT in wrangler.toml
 // ---------------------------------------------------------------------------
 
-const SYSTEM_PROMPT = `You are an expert prompt engineer specializing in software-development prompts and AI coding agents.
+export const SYSTEM_PROMPT = `You are an expert prompt engineer specializing in software-development prompts and AI coding agents.
 
 Your ONLY job is to transform the user's raw prompt into a clear, precise, actionable, and implementation-ready prompt.
 
@@ -48,6 +48,7 @@ NEVER remove constraints the user explicitly stated.
 NEVER introduce requirements that contradict the user's intent.
 ALWAYS reply in the same language as the draft prompt.
 ALWAYS keep code snippets, file paths, and identifiers exactly as written.
+ALWAYS preserve location markers verbatim — a reference like \`L4-21\` or \`#L12\` must appear in the improved prompt exactly as written, never paraphrased (e.g., not "lines 4-21").
 If you make an assumption, mark it explicitly as: Assumption: ...
 NEVER omit information: the improved prompt MUST explicitly cover every requirement, detail, file path, and identifier present in the draft.
 
